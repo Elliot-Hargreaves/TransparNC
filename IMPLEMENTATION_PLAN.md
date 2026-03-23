@@ -9,10 +9,10 @@ Focus on the low-level networking and establishing the automated testing infrast
     - [x] Update `Cargo.toml` with necessary dependencies (`boringtun`, `tokio`, `tun`, `serde`, `thiserror`).
     - [x] Define the project module structure (e.g., `core`, `net`, `gui`, `common`).
     - [x] Set up a basic GitHub Actions workflow for cross-platform builds (`linux`, `windows`, `macos`).
-- [ ] **Virtual Interface (TUN) Management & Initial Tests**
+- [x] **Virtual Interface (TUN) Management & Initial Tests**
     - [x] Implement cross-platform TUN interface creation using the `tun` or `tokio-tun` crate.
-    - [ ] Handle platform-specific configuration (IP assignment, MTU) for Linux, Windows, and macOS.
-    - [ ] **Test:** Create a script using Docker or Network Namespaces (Linux) to verify TUN creation and basic packet flow.
+    - [x] Handle platform-specific configuration (IP assignment, MTU) for Linux, Windows, and macOS.
+    - [x] **Test:** Create a script using Docker or Network Namespaces (Linux) to verify TUN creation and basic packet flow.
 - [ ] **WireGuard Integration & Connectivity Tests**
     - [ ] Integrate `boringtun` for userspace WireGuard implementation.
     - [ ] Implement packet processing loop (reading from TUN -> encrypting -> sending to UDP, and vice versa).
