@@ -3,14 +3,11 @@
 
 use anyhow::{anyhow, Result};
 use std::net::Ipv4Addr;
-use std::io::{Read, Write};
-use tun::{AbstractDevice, Configuration};
+use tokio_tun::Tun;
 
 /// Configuration for a TUN interface.
 pub struct TunConfig {
     /// The name of the interface.
-    /// On Linux, it's something like "tun0".
-    /// On macOS, it's something like "utun0".
     pub name: String,
     /// The IP address to assign to the interface.
     pub address: Ipv4Addr,
@@ -36,10 +33,10 @@ impl Default for TunConfig {
     }
 }
 
-/// A wrapper around a TUN device.
+/// A wrapper around a asynchronous TUN device.
 pub struct TunDevice {
-    /// The underlying OS TUN device.
-    device: Box<dyn AbstractDevice + Send + Sync>,
+    /// The underlying async TUN device.
+    pub device: Tun,
 }
 
 impl TunDevice {
@@ -50,58 +47,17 @@ impl TunDevice {
     ///
     /// # Errors
     /// Returns an error if the interface could not be created or configured.
-    /// This typically happens if the user lacks the necessary permissions (e.g., root on Linux).
     pub fn new(config: TunConfig) -> Result<Self> {
-        let mut tun_config = Configuration::default();
-
-        tun_config
-            .tun_name(&config.name)
+        let device = Tun::builder()
+            .name(&config.name)
             .address(config.address)
             .netmask(config.netmask)
-            .mtu(config.mtu)
-            .up();
-
-        // On Windows, you might need to specify the device path or use wintun.
-        // The `tun` crate handles much of this, but we may need to refine this later.
-
-        let device = tun::create(&tun_config)
+            .mtu(config.mtu as i32)
+            .up()
+            .try_build()
             .map_err(|e| anyhow!("Failed to create TUN device: {}", e))?;
 
-        Ok(Self {
-            device: Box::new(device),
-        })
-    }
-
-    /// Reads a packet from the TUN interface.
-    ///
-    /// # Arguments
-    /// * `buf` - The buffer to read the packet into.
-    ///
-    /// # Returns
-    /// The number of bytes read.
-    ///
-    /// # Errors
-    /// Returns an error if the read operation fails.
-    pub fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        self.device
-            .read(buf)
-            .map_err(|e| anyhow!("Failed to read from TUN device: {}", e))
-    }
-
-    /// Writes a packet to the TUN interface.
-    ///
-    /// # Arguments
-    /// * `buf` - The buffer containing the packet to write.
-    ///
-    /// # Returns
-    /// The number of bytes written.
-    ///
-    /// # Errors
-    /// Returns an error if the write operation fails.
-    pub fn write(&mut self, buf: &[u8]) -> Result<usize> {
-        self.device
-            .write(buf)
-            .map_err(|e| anyhow!("Failed to write to TUN device: {}", e))
+        Ok(Self { device })
     }
 }
 

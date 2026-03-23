@@ -13,10 +13,10 @@ Focus on the low-level networking and establishing the automated testing infrast
     - [x] Implement cross-platform TUN interface creation using the `tun` or `tokio-tun` crate.
     - [x] Handle platform-specific configuration (IP assignment, MTU) for Linux, Windows, and macOS.
     - [x] **Test:** Create a script using Docker or Network Namespaces (Linux) to verify TUN creation and basic packet flow.
-- [ ] **WireGuard Integration & Connectivity Tests**
-    - [ ] Integrate `boringtun` for userspace WireGuard implementation.
-    - [ ] Implement packet processing loop (reading from TUN -> encrypting -> sending to UDP, and vice versa).
-    - [ ] Key generation and management (Public/Private keys).
+- [x] **WireGuard Integration & Connectivity Tests**
+    - [x] Integrate `boringtun` for userspace WireGuard implementation.
+    - [x] Implement packet processing loop (reading from TUN -> encrypting -> sending to UDP, and vice versa).
+    - [x] Key generation and management (Public/Private keys).
     - [ ] **Test:** Automate "ping tests" between two virtual interfaces in a simulated network.
 
 ## Phase 2: NAT Traversal & Signaling
