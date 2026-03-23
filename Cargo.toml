@@ -1,6 +1,13 @@
 [package]
-name = "TransparNC"
+name = "transpar_nc"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+boringtun = "0.7"
+tokio = { version = "1.50", features = ["full"] }
+tun = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+anyhow = "1.0"
+iced = "0.14.0"

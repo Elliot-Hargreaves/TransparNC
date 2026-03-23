@@ -5,12 +5,12 @@ This document outlines the roadmap and checklist for developing TransparNC, a cr
 ## Phase 1: Core Networking & Virtualized Testing
 Focus on the low-level networking and establishing the automated testing infrastructure from the beginning.
 
-- [ ] **Project Initialization & Testing Infrastructure**
-    - [ ] Update `Cargo.toml` with necessary dependencies (`boringtun`, `tokio`, `tun`, `serde`, `thiserror`).
-    - [ ] Define the project module structure (e.g., `core`, `net`, `gui`, `common`).
-    - [ ] Set up a basic GitHub Actions workflow for cross-platform builds (`linux`, `windows`, `macos`).
+- [x] **Project Initialization & Testing Infrastructure**
+    - [x] Update `Cargo.toml` with necessary dependencies (`boringtun`, `tokio`, `tun`, `serde`, `thiserror`).
+    - [x] Define the project module structure (e.g., `core`, `net`, `gui`, `common`).
+    - [x] Set up a basic GitHub Actions workflow for cross-platform builds (`linux`, `windows`, `macos`).
 - [ ] **Virtual Interface (TUN) Management & Initial Tests**
-    - [ ] Implement cross-platform TUN interface creation using the `tun` or `tokio-tun` crate.
+    - [x] Implement cross-platform TUN interface creation using the `tun` or `tokio-tun` crate.
     - [ ] Handle platform-specific configuration (IP assignment, MTU) for Linux, Windows, and macOS.
     - [ ] **Test:** Create a script using Docker or Network Namespaces (Linux) to verify TUN creation and basic packet flow.
 - [ ] **WireGuard Integration & Connectivity Tests**
