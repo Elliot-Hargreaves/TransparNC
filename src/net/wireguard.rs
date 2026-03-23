@@ -118,14 +118,7 @@ mod tests {
     fn test_peer_creation() {
         let local = KeyPair::generate();
         let remote = KeyPair::generate();
-        let peer = WireGuardPeer::new(
-            local.private,
-            remote.public,
-            None,
-            None,
-            1,
-            None,
-        );
+        let peer = WireGuardPeer::new(local.private, remote.public, None, None, 1, None);
         assert!(peer.is_ok());
     }
 }

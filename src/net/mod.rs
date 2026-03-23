@@ -2,13 +2,13 @@
 pub mod tun;
 pub mod wireguard;
 
-use tokio::net::UdpSocket;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 use crate::net::tun::TunDevice;
 use crate::net::wireguard::WireGuardPeer;
 use boringtun::noise::TunnResult;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UdpSocket;
+use tokio::sync::Mutex;
 
 /// The main VPN engine that connects TUN interface with WireGuard peers.
 pub struct VpnEngine {
@@ -55,13 +55,12 @@ impl VpnEngine {
                             // For simplicity, we send to the first peer with an endpoint.
                             // In a real P2P VPN, we'd look up the peer by destination IP.
                             if let Some(peer) = peers.iter_mut().find(|p| p.endpoint().is_some()) {
-                                match peer.encapsulate(&buf[..n], &mut out) {
-                                    TunnResult::WriteToNetwork(packet) => {
-                                        if let Some(endpoint) = peer.endpoint() {
-                                            let _ = udp.send_to(packet, endpoint).await;
-                                        }
+                                if let TunnResult::WriteToNetwork(packet) =
+                                    peer.encapsulate(&buf[..n], &mut out)
+                                {
+                                    if let Some(endpoint) = peer.endpoint() {
+                                        let _ = udp.send_to(packet, endpoint).await;
                                     }
-                                    _ => {}
                                 }
                             }
                         }
@@ -78,24 +77,20 @@ impl VpnEngine {
             tokio::spawn(async move {
                 let mut buf = [0u8; 2048];
                 let mut out = [0u8; 2048];
-                loop {
-                    match udp.recv_from(&mut buf).await {
-                        Ok((n, addr)) => {
-                            let mut peers = peers.lock().await;
-                            // Find peer by endpoint or try all (simpler for now)
-                            if let Some(peer) = peers.iter_mut().find(|p| p.endpoint() == Some(addr)) {
-                                match peer.decapsulate(&buf[..n], &mut out) {
-                                    TunnResult::WriteToTunnelV4(packet, _) | TunnResult::WriteToTunnelV6(packet, _) => {
-                                        let _ = tun_writer.write_all(packet).await;
-                                    }
-                                    TunnResult::WriteToNetwork(packet) => {
-                                        let _ = udp.send_to(packet, addr).await;
-                                    }
-                                    _ => {}
-                                }
+                while let Ok((n, addr)) = udp.recv_from(&mut buf).await {
+                    let mut peers = peers.lock().await;
+                    // Find peer by endpoint or try all (simpler for now)
+                    if let Some(peer) = peers.iter_mut().find(|p| p.endpoint() == Some(addr)) {
+                        match peer.decapsulate(&buf[..n], &mut out) {
+                            TunnResult::WriteToTunnelV4(packet, _)
+                            | TunnResult::WriteToTunnelV6(packet, _) => {
+                                let _ = tun_writer.write_all(packet).await;
                             }
+                            TunnResult::WriteToNetwork(packet) => {
+                                let _ = udp.send_to(packet, addr).await;
+                            }
+                            _ => {}
                         }
-                        Err(_) => break,
                     }
                 }
             })

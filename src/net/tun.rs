@@ -1,7 +1,7 @@
 //! TUN interface management for TransparNC.
 //! This module handles the creation and configuration of virtual network interfaces.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::net::Ipv4Addr;
 use tokio_tun::Tun;
 
@@ -77,6 +77,10 @@ mod tests {
     fn test_create_tun() {
         let config = TunConfig::default();
         let device = TunDevice::new(config);
-        assert!(device.is_ok(), "Failed to create TUN device: {:?}", device.err());
+        assert!(
+            device.is_ok(),
+            "Failed to create TUN device: {:?}",
+            device.err()
+        );
     }
 }

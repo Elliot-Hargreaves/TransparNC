@@ -1,0 +1,31 @@
+services:
+  peer1:
+    build: .
+    image: transpar-nc-peer1
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    networks:
+      vpn_net:
+        ipv4_address: 172.20.0.2
+    command: --local-port 51820 --tun-ip 10.0.0.1
+
+  peer2:
+    build: .
+    image: transpar-nc-peer2
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    networks:
+      vpn_net:
+        ipv4_address: 172.20.0.3
+    command: --local-port 51820 --tun-ip 10.0.0.2
+
+networks:
+  vpn_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
