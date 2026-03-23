@@ -22,9 +22,10 @@ Focus on the low-level networking and establishing the automated testing infrast
 ## Phase 2: NAT Traversal & Signaling
 The "magic" that allows peers to connect behind firewalls.
 
-- [ ] **Signaling System**
-    - [ ] Implement a basic signaling server or use an existing DHT/WebRTC signaling approach.
-    - [ ] Define exchange protocol for peer metadata (public keys, endpoints).
+- [x] **Signaling System**
+    - [x] Implement a basic signaling server using `axum` and WebSockets.
+    - [x] Define exchange protocol for peer metadata (public keys, endpoints) in `src/common/messages.rs`.
+    - [x] Integrate Redis for session persistence and state sharing.
 - [ ] **NAT Discovery (STUN/TURN)**
     - [ ] Integrate a STUN client to discover external IP/Port.
     - [ ] Implement ICE-like candidate gathering and hole punching.
