@@ -51,7 +51,22 @@ Creating the user-facing application using the Iced framework.
     - [ ] Apply a clean, modern aesthetic to the UI.
     - [ ] System tray integration (if supported/required).
 
-## Phase 4: Distribution & Packaging
+## Phase 4: Relay Server (Optional, Self-Hosted)
+An optional relay (TURN-like) server for peers that cannot establish direct connections (e.g., symmetric NAT ↔ symmetric NAT). This is a separate service from the signaling server to avoid turning the signaling host into an open proxy.
+
+- [ ] **Relay Server Binary (`transparnc-relay`)**
+    - [ ] Implement a standalone relay server binary that forwards encrypted UDP traffic between peers.
+    - [ ] Authentication via relay tokens to prevent unauthorized use.
+    - [ ] Rate limiting and connection caps to bound resource usage.
+- [ ] **Relay Candidate Support in Client**
+    - [ ] Add a `Relay` variant to the `Candidate` enum, gated behind configuration (no relay candidates produced if no relay server is configured).
+    - [ ] Relay candidates should have the lowest priority in connectivity checks — used only as a last resort when hole punching fails.
+    - [ ] Signaling server URL and relay server URL must be completely independent configuration fields.
+- [ ] **Relay Integration Tests**
+    - [ ] Container-based tests with a relay server verifying fallback connectivity when direct paths are blocked.
+    - [ ] Verify that relay is never used when direct connectivity succeeds.
+
+## Phase 5: Distribution & Packaging
 Preparing the app for end-users.
 
 - [ ] **Packaging**
