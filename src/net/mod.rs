@@ -1,11 +1,12 @@
+pub mod ice;
+pub mod nat;
 /// Networking implementation including TUN management and WireGuard integration.
 pub mod tun;
 pub mod wireguard;
-pub mod nat;
 
+use crate::net::nat::StunClient;
 use crate::net::tun::TunDevice;
 use crate::net::wireguard::WireGuardPeer;
-use crate::net::nat::StunClient;
 use boringtun::noise::TunnResult;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

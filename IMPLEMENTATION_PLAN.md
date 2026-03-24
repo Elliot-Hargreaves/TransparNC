@@ -28,7 +28,7 @@ The "magic" that allows peers to connect behind firewalls.
     - [x] Integrate Redis for session persistence and state sharing.
 - [x] **NAT Discovery (STUN/TURN)**
     - [x] Integrate a STUN client to discover external IP/Port.
-    - [ ] Implement ICE-like candidate gathering and hole punching.
+    - [x] Implement ICE-like candidate gathering and hole punching.
 - [ ] **Peer Management**
     - [ ] Maintain a list of active peers and their connection status.
     - [ ] Implement heartbeat/keep-alive mechanism to maintain NAT mappings.

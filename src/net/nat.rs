@@ -3,10 +3,10 @@
 
 use async_trait::async_trait;
 use std::net::SocketAddr;
-use thiserror::Error;
-use stun::message::{Message, BINDING_REQUEST, Getter};
-use tokio::net::UdpSocket;
 use std::time::Duration;
+use stun::message::{BINDING_REQUEST, Getter, Message};
+use thiserror::Error;
+use tokio::net::UdpSocket;
 
 /// Errors related to NAT discovery.
 #[derive(Debug, Error)]
@@ -43,7 +43,7 @@ impl RealStunClient {
 impl StunClient for RealStunClient {
     async fn discover_external_addr(&self, socket: &UdpSocket) -> Result<SocketAddr, NatError> {
         println!("STUN: Connecting to {}", self.stun_server);
-        
+
         let mut msg = Message::new();
         msg.set_type(BINDING_REQUEST);
         msg.new_transaction_id().map_err(|_| NatError::ParseError)?;
@@ -51,7 +51,10 @@ impl StunClient for RealStunClient {
 
         // Try multiple times as UDP is unreliable
         for attempt in 1..=3 {
-            println!("STUN: Sending request to {} (attempt {})...", self.stun_server, attempt);
+            println!(
+                "STUN: Sending request to {} (attempt {})...",
+                self.stun_server, attempt
+            );
             if let Err(e) = socket.send_to(msg.raw.as_slice(), &self.stun_server).await {
                 println!("STUN: Send error: {}", e);
                 if attempt == 3 {

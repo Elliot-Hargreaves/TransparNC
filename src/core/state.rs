@@ -16,9 +16,7 @@ pub(crate) enum CoreState {
         peers: Vec<PeerInfo>,
     },
     /// Establishing a direct P2P connection with a peer.
-    Handshaking {
-        target_peer: PeerId,
-    },
+    Handshaking { target_peer: PeerId },
     /// Connected and routing traffic.
     Connected,
 }

@@ -23,3 +23,4 @@ futures-util = "0.3"
 uuid = { version = "1.15", features = ["v4", "serde"] }
 stun = "0.7"
 async-trait = "0.1"
+if-addrs = "0.13"

@@ -7,8 +7,9 @@ RUN apt-get update && apt-get install -y \
     iputils-ping \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the compiled binary
+# Copy the compiled binaries
 COPY target/release/transpar_nc /usr/local/bin/transpar_nc
+COPY target/release/ice_test_peer /usr/local/bin/ice_test_peer
 
 # Set the working directory
 WORKDIR /app

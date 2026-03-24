@@ -22,9 +22,7 @@ pub enum SignalingMessage {
         public_key: String,
     },
     /// Server acknowledges join and sends current peer list.
-    Joined {
-        peers: Vec<PeerInfo>,
-    },
+    Joined { peers: Vec<PeerInfo> },
     /// Sent to a specific peer to initiate connection (SDP/ICE candidate exchange).
     Signal {
         to: PeerId,
@@ -32,9 +30,7 @@ pub enum SignalingMessage {
         data: String,
     },
     /// Periodic heartbeat to keep the signaling session alive.
-    Heartbeat {
-        peer_id: PeerId,
-    },
+    Heartbeat { peer_id: PeerId },
 }
 
 /// Basic information about a peer in a network.
@@ -42,4 +38,13 @@ pub enum SignalingMessage {
 pub struct PeerInfo {
     pub peer_id: PeerId,
     pub public_key: String,
+}
+
+/// Payload for exchanging ICE-like candidates between peers via the `Signal`
+/// message's `data` field. Serialized as JSON for transport over the signaling
+/// channel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CandidateExchange {
+    /// The list of connectivity candidates gathered by the sending peer.
+    pub candidates: Vec<crate::net::ice::Candidate>,
 }

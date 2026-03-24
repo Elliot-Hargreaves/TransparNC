@@ -4,20 +4,20 @@
 //! and relaying signaling messages between peers. It uses Redis for session persistence.
 
 use axum::{
+    Router,
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
         State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     response::IntoResponse,
     routing::get,
-    Router,
 };
 use futures_util::{SinkExt, StreamExt};
 use redis::AsyncCommands;
 use serde_json;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::sync::RwLock;
-use transpar_nc::common::messages::{PeerId, SignalingMessage, PeerInfo};
+use transpar_nc::common::messages::{PeerId, PeerInfo, SignalingMessage};
 
 /// Shared state for the signaling server.
 struct ServerState {
@@ -82,26 +82,47 @@ async fn handle_socket(socket: WebSocket, state: Arc<ServerState>) {
         if let Message::Text(text) = msg {
             if let Ok(sig_msg) = serde_json::from_str::<SignalingMessage>(&text) {
                 match sig_msg {
-                    SignalingMessage::Join { network_id, peer_id, public_key } => {
+                    SignalingMessage::Join {
+                        network_id,
+                        peer_id,
+                        public_key,
+                    } => {
                         current_peer_id = Some(peer_id);
-                        
+
                         // Register peer in state
                         state.active_peers.write().await.insert(peer_id, tx.clone());
-                        
+
                         // Persist peer in Redis (with TTL)
                         if let Ok(mut conn) = state.redis.get_multiplexed_async_connection().await {
                             let key = format!("net:{}:peers", network_id.0);
-                            let peer_info = PeerInfo { peer_id, public_key };
-                            let _: () = conn.hset(key.clone(), peer_id.0.to_string(), serde_json::to_string(&peer_info).unwrap()).await.unwrap_or(());
+                            let peer_info = PeerInfo {
+                                peer_id,
+                                public_key,
+                            };
+                            let _: () = conn
+                                .hset(
+                                    key.clone(),
+                                    peer_id.0.to_string(),
+                                    serde_json::to_string(&peer_info).unwrap(),
+                                )
+                                .await
+                                .unwrap_or(());
                             let _: () = conn.expire(key.clone(), 3600).await.unwrap_or(()); // 1 hour TTL
-                            
+
                             // Get current peers in the network
-                            if let Ok(peers_map) = conn.hgetall::<String, HashMap<String, String>>(key).await {
-                                let peers: Vec<PeerInfo> = peers_map.values()
+                            if let Ok(peers_map) =
+                                conn.hgetall::<String, HashMap<String, String>>(key).await
+                            {
+                                let peers: Vec<PeerInfo> = peers_map
+                                    .values()
                                     .filter_map(|s| serde_json::from_str(s).ok())
                                     .collect();
-                                
-                                let _ = tx.send(Message::Text(serde_json::to_string(&SignalingMessage::Joined { peers }).unwrap().into()));
+
+                                let _ = tx.send(Message::Text(
+                                    serde_json::to_string(&SignalingMessage::Joined { peers })
+                                        .unwrap()
+                                        .into(),
+                                ));
                             }
                         }
                     }
@@ -110,7 +131,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<ServerState>) {
                         let peers = state.active_peers.read().await;
                         if let Some(target_tx) = peers.get(&to) {
                             let relay = SignalingMessage::Signal { to, from, data };
-                            let _ = target_tx.send(Message::Text(serde_json::to_string(&relay).unwrap().into()));
+                            let _ = target_tx
+                                .send(Message::Text(serde_json::to_string(&relay).unwrap().into()));
                         }
                     }
                     SignalingMessage::Heartbeat { peer_id } => {

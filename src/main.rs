@@ -5,9 +5,9 @@ use boringtun::x25519::{PublicKey, StaticSecret};
 use clap::{Parser, Subcommand};
 use std::net::{Ipv4Addr, SocketAddr};
 use transpar_nc::net::VpnEngine;
+use transpar_nc::net::nat::{RealStunClient, StunClient};
 use transpar_nc::net::tun::{TunConfig, TunDevice};
 use transpar_nc::net::wireguard::{KeyPair, WireGuardPeer};
-use transpar_nc::net::nat::{RealStunClient, StunClient};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -69,7 +69,8 @@ async fn main() -> anyhow::Result<()> {
     let tun_device = TunDevice::new(tun_config)?;
 
     // Configure STUN
-    let stun_client: Option<Box<dyn StunClient>> = cli.stun_server
+    let stun_client: Option<Box<dyn StunClient>> = cli
+        .stun_server
         .map(|s| Box::new(RealStunClient::new(s)) as Box<dyn StunClient>);
 
     // Configure VPN Engine

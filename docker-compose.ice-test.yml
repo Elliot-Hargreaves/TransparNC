@@ -1,0 +1,161 @@
+# Docker Compose topology for ICE integration tests.
+#
+# Topology:
+#   private-net-1          public-net           private-net-2
+#   [peer-1] <-> [nat-router-1] <-> [stun + signaling] <-> [nat-router-2] <-> [peer-2]
+#
+# NAT routers use iptables MASQUERADE to simulate home routers.
+# Peers can only reach the public network through their respective NAT gateway.
+
+services:
+  # --- Public network services ---
+
+  stun-server:
+    image: coturn/coturn
+    container_name: ice-stun
+    command:
+      - "-n"
+      - "--no-auth"
+      - "--no-tls"
+      - "--no-dtls"
+      - "--listening-ip=0.0.0.0"
+      - "--external-ip=172.50.0.100"
+      - "--log-file=stdout"
+      - "-v"
+    networks:
+      public_net:
+        ipv4_address: 172.50.0.100
+
+  signaling-server:
+    container_name: ice-signaling
+    build:
+      context: .
+      dockerfile: Dockerfile.signaling
+    networks:
+      public_net:
+        ipv4_address: 172.50.0.101
+
+  # --- NAT Router 1 (bridges private-net-1 <-> public-net) ---
+
+  nat-router-1:
+    container_name: ice-nat-router-1
+    image: alpine
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv4.ip_forward=1
+    networks:
+      public_net:
+        ipv4_address: 172.50.0.10
+      private_net_1:
+        ipv4_address: 172.60.0.2
+    tty: true
+    command: >
+      sh -c "
+      apk add --no-cache iptables iproute2 &&
+      PUBLIC_IF=$$(ip -4 addr show | grep 172.50 | awk '{print $$NF}') &&
+      echo \"NAT-1 public interface: $$PUBLIC_IF\" &&
+      iptables -t nat -A POSTROUTING -o $$PUBLIC_IF -j MASQUERADE &&
+      echo 'NAT-1 ready' &&
+      sleep 3600
+      "
+    depends_on:
+      - stun-server
+      - signaling-server
+
+  # --- NAT Router 2 (bridges private-net-2 <-> public-net) ---
+
+  nat-router-2:
+    container_name: ice-nat-router-2
+    image: alpine
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv4.ip_forward=1
+    networks:
+      public_net:
+        ipv4_address: 172.50.0.20
+      private_net_2:
+        ipv4_address: 172.70.0.2
+    tty: true
+    command: >
+      sh -c "
+      apk add --no-cache iptables iproute2 &&
+      PUBLIC_IF=$$(ip -4 addr show | grep 172.50 | awk '{print $$NF}') &&
+      echo \"NAT-2 public interface: $$PUBLIC_IF\" &&
+      iptables -t nat -A POSTROUTING -o $$PUBLIC_IF -j MASQUERADE &&
+      echo 'NAT-2 ready' &&
+      sleep 3600
+      "
+    depends_on:
+      - stun-server
+      - signaling-server
+
+  # --- Peer 1 (behind NAT router 1) ---
+
+  peer-1:
+    container_name: ice-peer-1
+    build: .
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    networks:
+      private_net_1:
+        ipv4_address: 172.60.0.10
+    tty: true
+    entrypoint: /bin/sh
+    command: >
+      -c "
+      ip route del default || true &&
+      ip route add default via 172.60.0.2 &&
+      echo 'Peer-1 routing configured, waiting for NAT routers...' &&
+      sleep 10 &&
+      echo 'Peer-1 ready' &&
+      sleep 3600
+      "
+    depends_on:
+      - nat-router-1
+
+  # --- Peer 2 (behind NAT router 2) ---
+
+  peer-2:
+    container_name: ice-peer-2
+    build: .
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    networks:
+      private_net_2:
+        ipv4_address: 172.70.0.10
+    tty: true
+    entrypoint: /bin/sh
+    command: >
+      -c "
+      ip route del default || true &&
+      ip route add default via 172.70.0.2 &&
+      echo 'Peer-2 routing configured, waiting for NAT routers...' &&
+      sleep 10 &&
+      echo 'Peer-2 ready' &&
+      sleep 3600
+      "
+    depends_on:
+      - nat-router-2
+
+networks:
+  public_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.50.0.0/16
+  private_net_1:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.60.0.0/16
+  private_net_2:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.70.0.0/16
