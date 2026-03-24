@@ -15,4 +15,4 @@ COPY target/release/ice_test_peer /usr/local/bin/ice_test_peer
 WORKDIR /app
 
 # Default command
-CMD ["transpar_nc"]
+ENTRYPOINT ["transpar_nc"]

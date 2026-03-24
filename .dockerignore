@@ -1,9 +1,20 @@
-target/
-!target/release/transpar_nc
+# Ignore VCS and IDE files
 .git/
 .github/
 .idea/
-tests/
+
+# Ignore documentation (not needed in images)
 *.md
-Cargo.lock
-Cargo.toml
+
+# Ignore test scripts (not needed inside containers, mounted or copied separately)
+tests/
+
+# Ignore bulky build artifacts but keep release binaries.
+# The main Dockerfile copies pre-built binaries from target/release/,
+# and Dockerfile.signaling builds from source (needs Cargo.toml + Cargo.lock).
+target/*/incremental/
+target/*/deps/
+target/*/examples/
+target/*/build/
+target/*/.*
+target/doc/

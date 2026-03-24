@@ -23,6 +23,8 @@ echo "Peer 1 Public Key: $PEER1_PUB"
 echo "Peer 2 Public Key: $PEER2_PUB"
 
 echo "--- 4. Starting nodes with full configuration ---"
+# Remove any leftover named containers from a previous run to avoid conflicts.
+docker rm -f peer1 peer2 2>/dev/null || true
 # Peer 1 config: local-port 51820, tun-ip 10.0.0.1, peer is Peer 2 at 172.20.0.3:51820
 docker compose -f docker-compose.test.yml run -d --name peer1 peer1 \
     --local-port 51820 --tun-ip 10.0.0.1 \

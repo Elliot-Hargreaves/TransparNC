@@ -63,7 +63,7 @@ services:
       public_net:
         ipv4_address: 172.30.0.3
     tty: true
-    command: /usr/local/bin/transpar_nc --local-port 51820 --tun-ip 10.0.0.2 --stun-server 172.30.0.100:3478
+    command: ["--local-port", "51820", "--tun-ip", "10.0.0.2", "--stun-server", "172.30.0.100:3478"]
     depends_on:
       - stun-server
 
