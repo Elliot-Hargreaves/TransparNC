@@ -13,5 +13,5 @@ COPY target/release/transpar_nc /usr/local/bin/transpar_nc
 # Set the working directory
 WORKDIR /app
 
-# Run the binary
-ENTRYPOINT ["transpar_nc"]
+# Default command
+CMD ["transpar_nc"]

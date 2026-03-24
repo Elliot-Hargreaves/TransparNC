@@ -1,9 +1,11 @@
 /// Networking implementation including TUN management and WireGuard integration.
 pub mod tun;
 pub mod wireguard;
+pub mod nat;
 
 use crate::net::tun::TunDevice;
 use crate::net::wireguard::WireGuardPeer;
+use crate::net::nat::StunClient;
 use boringtun::noise::TunnResult;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -15,16 +17,22 @@ pub struct VpnEngine {
     tun: TunDevice,
     peers: Arc<Mutex<Vec<WireGuardPeer>>>,
     udp: Arc<UdpSocket>,
+    stun_client: Option<Box<dyn StunClient>>,
 }
 
 impl VpnEngine {
     /// Creates a new VPN engine.
-    pub async fn new(tun: TunDevice, local_port: u16) -> anyhow::Result<Self> {
+    pub async fn new(
+        tun: TunDevice,
+        local_port: u16,
+        stun_client: Option<Box<dyn StunClient>>,
+    ) -> anyhow::Result<Self> {
         let udp = UdpSocket::bind(format!("0.0.0.0:{}", local_port)).await?;
         Ok(Self {
             tun,
             peers: Arc::new(Mutex::new(Vec::new())),
             udp: Arc::new(udp),
+            stun_client,
         })
     }
 
@@ -36,6 +44,13 @@ impl VpnEngine {
 
     /// Runs the main packet processing loop.
     pub async fn run(self) -> anyhow::Result<()> {
+        if let Some(stun) = &self.stun_client {
+            match stun.discover_external_addr(&self.udp).await {
+                Ok(addr) => println!("Discovered external address: {}", addr),
+                Err(e) => eprintln!("NAT discovery failed: {}", e),
+            }
+        }
+
         let (mut tun_reader, mut tun_writer) = tokio::io::split(self.tun.device);
         let peers = self.peers.clone();
         let udp = self.udp.clone();

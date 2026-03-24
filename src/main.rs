@@ -7,6 +7,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use transpar_nc::net::VpnEngine;
 use transpar_nc::net::tun::{TunConfig, TunDevice};
 use transpar_nc::net::wireguard::{KeyPair, WireGuardPeer};
+use transpar_nc::net::nat::{RealStunClient, StunClient};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -33,6 +34,10 @@ struct Cli {
     /// The physical IP:Port of the remote peer.
     #[arg(long)]
     peer_endpoint: Option<SocketAddr>,
+
+    /// STUN server address for NAT discovery.
+    #[arg(long)]
+    stun_server: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -63,8 +68,12 @@ async fn main() -> anyhow::Result<()> {
     };
     let tun_device = TunDevice::new(tun_config)?;
 
+    // Configure STUN
+    let stun_client: Option<Box<dyn StunClient>> = cli.stun_server
+        .map(|s| Box::new(RealStunClient::new(s)) as Box<dyn StunClient>);
+
     // Configure VPN Engine
-    let engine = VpnEngine::new(tun_device, cli.local_port).await?;
+    let engine = VpnEngine::new(tun_device, cli.local_port, stun_client).await?;
 
     // Add peer if provided
     if let (Some(peer_key_str), Some(peer_endpoint)) = (cli.peer_key, cli.peer_endpoint) {

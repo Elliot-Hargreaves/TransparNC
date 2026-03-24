@@ -1,0 +1,9 @@
+target/
+!target/release/transpar_nc
+.git/
+.github/
+.idea/
+tests/
+*.md
+Cargo.lock
+Cargo.toml

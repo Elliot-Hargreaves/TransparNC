@@ -26,8 +26,8 @@ The "magic" that allows peers to connect behind firewalls.
     - [x] Implement a basic signaling server using `axum` and WebSockets.
     - [x] Define exchange protocol for peer metadata (public keys, endpoints) in `src/common/messages.rs`.
     - [x] Integrate Redis for session persistence and state sharing.
-- [ ] **NAT Discovery (STUN/TURN)**
-    - [ ] Integrate a STUN client to discover external IP/Port.
+- [x] **NAT Discovery (STUN/TURN)**
+    - [x] Integrate a STUN client to discover external IP/Port.
     - [ ] Implement ICE-like candidate gathering and hole punching.
 - [ ] **Peer Management**
     - [ ] Maintain a list of active peers and their connection status.
