@@ -100,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
             0,
             Some(peer_endpoint),
         )?;
-        engine.add_peer(peer).await;
+        engine.add_wg_peer(peer).await;
     }
 
     println!("Starting VPN engine on port {}...", cli.local_port);

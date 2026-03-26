@@ -29,9 +29,9 @@ The "magic" that allows peers to connect behind firewalls.
 - [x] **NAT Discovery (STUN/TURN)**
     - [x] Integrate a STUN client to discover external IP/Port.
     - [x] Implement ICE-like candidate gathering and hole punching.
-- [ ] **Peer Management**
-    - [ ] Maintain a list of active peers and their connection status.
-    - [ ] Implement heartbeat/keep-alive mechanism to maintain NAT mappings.
+- [x] **Peer Management**
+    - [x] Maintain a list of active peers and their connection status.
+    - [x] Implement heartbeat/keep-alive mechanism to maintain NAT mappings.
 - [ ] **Integration Tests**
     - [ ] Verify NAT traversal logic in specialized CI environments (if possible) or through manual multi-machine tests.
 
