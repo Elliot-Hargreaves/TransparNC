@@ -32,8 +32,8 @@ The "magic" that allows peers to connect behind firewalls.
 - [x] **Peer Management**
     - [x] Maintain a list of active peers and their connection status.
     - [x] Implement heartbeat/keep-alive mechanism to maintain NAT mappings.
-- [ ] **Integration Tests**
-    - [ ] Verify NAT traversal logic in specialized CI environments (if possible) or through manual multi-machine tests.
+- [x] **Integration Tests**
+    - [x] Verify NAT traversal logic in specialized CI environments (if possible) or through manual multi-machine tests.
 
 ## Phase 3: GUI Development (Iced)
 Creating the user-facing application using the Iced framework.
