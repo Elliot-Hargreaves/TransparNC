@@ -343,22 +343,28 @@ async fn connect_to_signaling(
             Ok(tungstenite::Message::Text(text)) => {
                 eprintln!("[daemon] Received from signaling server: {}", text);
                 match serde_json::from_str::<SignalingMessage>(&text) {
-                    Ok(SignalingMessage::Joined { peers }) => {
+                    Ok(SignalingMessage::Joined {
+                        peers,
+                        assigned_ip,
+                        subnet,
+                    }) => {
                         eprintln!(
-                            "[daemon] Joined network successfully, {} existing peer(s)",
-                            peers.len()
+                            "[daemon] Joined network successfully, {} existing peer(s). Assigned IP: {}, Subnet: {}",
+                            peers.len(),
+                            assigned_ip,
+                            subnet
                         );
                         let ipc_peers: Vec<IpcPeerInfo> = peers
                             .iter()
                             .map(|p| IpcPeerInfo {
                                 name: p.peer_id.0.to_string(),
-                                virtual_ip: "pending".to_string(),
+                                virtual_ip: p.virtual_ip.clone(),
                                 connected: false,
                             })
                             .collect();
                         let mut st = state.lock().await;
                         st.status = ConnectionStatus::Connected {
-                            virtual_ip: "10.0.0.x".to_string(),
+                            virtual_ip: assigned_ip,
                         };
                         st.peers = ipc_peers.clone();
                         let _ = event_tx.send(DaemonEvent::StatusUpdate {
@@ -367,13 +373,24 @@ async fn connect_to_signaling(
                         let _ = event_tx.send(DaemonEvent::PeerUpdate { peers: ipc_peers });
                     }
                     Ok(SignalingMessage::PeerJoined { peer }) => {
-                        eprintln!("[daemon] New peer joined: {:?}", peer.peer_id);
+                        eprintln!(
+                            "[daemon] New peer joined: {:?} with IP {}",
+                            peer.peer_id, peer.virtual_ip
+                        );
                         let mut st = state.lock().await;
                         st.peers.push(IpcPeerInfo {
                             name: peer.peer_id.0.to_string(),
-                            virtual_ip: "pending".to_string(),
+                            virtual_ip: peer.virtual_ip.clone(),
                             connected: false,
                         });
+                        let _ = event_tx.send(DaemonEvent::PeerUpdate {
+                            peers: st.peers.clone(),
+                        });
+                    }
+                    Ok(SignalingMessage::PeerLeft { peer_id }) => {
+                        eprintln!("[daemon] Peer left: {:?}", peer_id);
+                        let mut st = state.lock().await;
+                        st.peers.retain(|p| p.name != peer_id.0.to_string());
                         let _ = event_tx.send(DaemonEvent::PeerUpdate {
                             peers: st.peers.clone(),
                         });

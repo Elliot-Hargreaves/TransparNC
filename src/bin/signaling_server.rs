@@ -1,7 +1,8 @@
 //! Signaling server for TransparNC.
 //!
 //! This server coordinates peer discovery and NAT traversal by managing "rooms" (networks)
-//! and relaying signaling messages between peers. It uses Redis for session persistence.
+//! and relaying signaling messages between peers. It uses Redis for session persistence
+//! and allocates Docker-style virtual IPs (172.X.0.N/24) to each peer.
 
 use axum::{
     Router,
@@ -16,7 +17,7 @@ use futures_util::{SinkExt, StreamExt};
 use redis::AsyncCommands;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::sync::RwLock;
-use transpar_nc::common::messages::{PeerId, PeerInfo, SignalingMessage};
+use transpar_nc::common::messages::{NetworkId, PeerId, PeerInfo, SignalingMessage};
 
 /// Shared state for the signaling server.
 struct ServerState {
@@ -25,6 +26,15 @@ struct ServerState {
     /// Active WebSocket connections for real-time relaying.
     /// Mapping: PeerId -> sender for their WebSocket.
     active_peers: RwLock<HashMap<PeerId, tokio::sync::mpsc::UnboundedSender<Message>>>,
+    /// Tracks which peer belongs to which network for disconnect cleanup.
+    peer_networks: RwLock<HashMap<PeerId, NetworkId>>,
+    /// Tracks which subnet octet (the X in 172.X.0.0/24) is assigned to each network.
+    network_subnets: RwLock<HashMap<NetworkId, u8>>,
+    /// Tracks assigned client indices per network. Each slot is `Some(peer_id)` when
+    /// occupied or `None` when recycled after a disconnect.
+    network_allocations: RwLock<HashMap<NetworkId, Vec<Option<PeerId>>>>,
+    /// Next available subnet octet (starts at 16 to mimic Docker's 172.16+ range).
+    next_subnet_octet: RwLock<u8>,
 }
 
 #[tokio::main]
@@ -41,6 +51,10 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(ServerState {
         redis: redis_client,
         active_peers: RwLock::new(HashMap::new()),
+        peer_networks: RwLock::new(HashMap::new()),
+        network_subnets: RwLock::new(HashMap::new()),
+        network_allocations: RwLock::new(HashMap::new()),
+        next_subnet_octet: RwLock::new(16),
     });
 
     let app = Router::new()
@@ -62,12 +76,49 @@ async fn ws_handler(
     ws.on_upgrade(|socket| handle_socket(socket, state))
 }
 
+/// Allocates a subnet octet for a network, reusing an existing one or assigning
+/// the next available value.
+async fn get_or_create_subnet(state: &ServerState, network_id: NetworkId) -> u8 {
+    let mut subnets = state.network_subnets.write().await;
+    if let Some(&octet) = subnets.get(&network_id) {
+        return octet;
+    }
+    let mut next = state.next_subnet_octet.write().await;
+    let octet = *next;
+    *next += 1;
+    subnets.insert(network_id, octet);
+    println!(
+        "[signaling] Assigned subnet 172.{}.0.0/24 to network {:?}",
+        octet, network_id
+    );
+    octet
+}
+
+/// Allocates a client index within a network, recycling gaps left by
+/// disconnected peers. Returns a 1-based index.
+async fn allocate_client_index(
+    state: &ServerState,
+    network_id: NetworkId,
+    peer_id: PeerId,
+) -> usize {
+    let mut allocs = state.network_allocations.write().await;
+    let slots = allocs.entry(network_id).or_default();
+    // Find first empty slot to recycle.
+    if let Some(i) = slots.iter().position(|s| s.is_none()) {
+        slots[i] = Some(peer_id);
+        i + 1
+    } else {
+        slots.push(Some(peer_id));
+        slots.len()
+    }
+}
+
 /// Handles an individual WebSocket connection.
 async fn handle_socket(socket: WebSocket, state: Arc<ServerState>) {
     let (mut sender, mut receiver) = socket.split();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
-    // Task to forward messages from the channel to the WebSocket sender
+    // Task to forward messages from the channel to the WebSocket sender.
     let send_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             if sender.send(msg).await.is_err() {
@@ -102,20 +153,37 @@ async fn handle_socket(socket: WebSocket, state: Arc<ServerState>) {
                     );
                     current_peer_id = Some(peer_id);
 
-                    // Register peer in state
+                    // Track which network this peer belongs to for cleanup.
+                    state
+                        .peer_networks
+                        .write()
+                        .await
+                        .insert(peer_id, network_id);
+
+                    // Register peer in active connections.
                     state.active_peers.write().await.insert(peer_id, tx.clone());
 
-                    // Persist peer in Redis (with TTL)
+                    // Allocate a virtual IP for this peer.
+                    let subnet_octet = get_or_create_subnet(&state, network_id).await;
+                    let client_index = allocate_client_index(&state, network_id, peer_id).await;
+                    let assigned_ip = format!("172.{}.0.{}", subnet_octet, client_index);
+                    let subnet = format!("172.{}.0.0/24", subnet_octet);
+                    println!(
+                        "[signaling] Assigned IP {} (subnet {}) to peer {:?}",
+                        assigned_ip, subnet, peer_id
+                    );
+
+                    let peer_info = PeerInfo {
+                        peer_id,
+                        public_key,
+                        virtual_ip: assigned_ip.clone(),
+                    };
+
+                    // Persist peer in Redis (with TTL).
                     if let Ok(mut conn) = state.redis.get_multiplexed_async_connection().await {
                         let key = format!("net:{}:peers", network_id.0);
-                        let peer_info = PeerInfo {
-                            peer_id,
-                            public_key,
-                        };
 
-                        // Fetch existing peers *before* inserting the newcomer so we can
-                        // notify them about the new arrival and send the newcomer the
-                        // existing list separately.
+                        // Fetch existing peers *before* inserting the newcomer.
                         let existing_peers: Vec<PeerInfo> = if let Ok(peers_map) = conn
                             .hgetall::<String, HashMap<String, String>>(key.clone())
                             .await
@@ -136,19 +204,20 @@ async fn handle_socket(socket: WebSocket, state: Arc<ServerState>) {
                             )
                             .await
                             .unwrap_or(());
-                        let _: () = conn.expire(key.clone(), 3600).await.unwrap_or(()); // 1 hour TTL
+                        let _: () = conn.expire(key.clone(), 3600).await.unwrap_or(());
 
                         // Notify the newcomer of all peers that were already present.
                         let _ = tx.send(Message::Text(
                             serde_json::to_string(&SignalingMessage::Joined {
                                 peers: existing_peers.clone(),
+                                assigned_ip,
+                                subnet,
                             })
                             .unwrap()
                             .into(),
                         ));
 
-                        // Notify every existing active peer that a new peer has joined so
-                        // they can proactively initiate candidate exchange.
+                        // Notify every existing active peer that a new peer has joined.
                         let active = state.active_peers.read().await;
                         let notification = serde_json::to_string(&SignalingMessage::PeerJoined {
                             peer: peer_info,
@@ -172,18 +241,54 @@ async fn handle_socket(socket: WebSocket, state: Arc<ServerState>) {
                     }
                 }
                 SignalingMessage::Heartbeat { peer_id } => {
-                    // Extend TTL in Redis could be done here if we tracked network_id
-                    println!("Heartbeat from {:?}", peer_id);
+                    println!("[signaling] Heartbeat from {:?}", peer_id);
                 }
                 _ => {}
             }
         }
     }
 
-    // Cleanup on disconnect
+    // Cleanup on disconnect — recycle IP and notify remaining peers.
     if let Some(peer_id) = current_peer_id {
         println!("[signaling] Peer {:?} disconnected", peer_id);
         state.active_peers.write().await.remove(&peer_id);
+
+        // Determine which network this peer was in.
+        let network_id = state.peer_networks.write().await.remove(&peer_id);
+
+        // Recycle the client index so the next joiner can reuse it.
+        {
+            let mut allocs = state.network_allocations.write().await;
+            if let Some(net_id) = network_id
+                && let Some(slots) = allocs.get_mut(&net_id)
+            {
+                for slot in slots.iter_mut() {
+                    if *slot == Some(peer_id) {
+                        *slot = None;
+                    }
+                }
+            }
+        }
+
+        // Remove from Redis.
+        if let Some(net_id) = network_id {
+            if let Ok(mut conn) = state.redis.get_multiplexed_async_connection().await {
+                let key = format!("net:{}:peers", net_id.0);
+                let _: () = conn.hdel(key, peer_id.0.to_string()).await.unwrap_or(());
+            }
+
+            // Notify remaining peers about the departure.
+            let active = state.active_peers.read().await;
+            let notification =
+                serde_json::to_string(&SignalingMessage::PeerLeft { peer_id }).unwrap();
+            let peer_networks = state.peer_networks.read().await;
+            for (other_id, other_tx) in active.iter() {
+                // Only notify peers in the same network.
+                if peer_networks.get(other_id) == Some(&net_id) {
+                    let _ = other_tx.send(Message::Text(notification.clone().into()));
+                }
+            }
+        }
     } else {
         println!("[signaling] Anonymous WebSocket connection closed");
     }

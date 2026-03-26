@@ -284,7 +284,7 @@ async fn exchange_candidates_via_signaling(
         if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
             let sig_msg: SignalingMessage = serde_json::from_str(&text)?;
             match sig_msg {
-                SignalingMessage::Joined { peers } => {
+                SignalingMessage::Joined { peers, .. } => {
                     println!("ICE_TEST: Joined network, {} existing peers", peers.len());
                     // Send our candidates to each existing peer.
                     for peer in &peers {

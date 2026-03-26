@@ -21,12 +21,20 @@ pub enum SignalingMessage {
         peer_id: PeerId,
         public_key: String,
     },
-    /// Server acknowledges join and sends current peer list.
-    Joined { peers: Vec<PeerInfo> },
+    /// Server acknowledges join, assigns a virtual IP, and sends current peer list.
+    Joined {
+        peers: Vec<PeerInfo>,
+        /// The virtual IP assigned to this peer (e.g. "172.18.0.1").
+        assigned_ip: String,
+        /// The subnet for this network (e.g. "172.18.0.0/24").
+        subnet: String,
+    },
     /// Server pushes a notification to existing members when a new peer joins.
     /// Allows already-connected peers to proactively initiate candidate exchange
     /// without waiting for the newcomer to send first.
     PeerJoined { peer: PeerInfo },
+    /// Notification when a peer disconnects, so clients can update their peer list.
+    PeerLeft { peer_id: PeerId },
     /// Sent to a specific peer to initiate connection (SDP/ICE candidate exchange).
     Signal {
         to: PeerId,
@@ -40,8 +48,12 @@ pub enum SignalingMessage {
 /// Basic information about a peer in a network.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerInfo {
+    /// Unique identifier for this peer.
     pub peer_id: PeerId,
+    /// The peer's public key for WireGuard.
     pub public_key: String,
+    /// The virtual IP assigned to this peer (e.g. "172.18.0.2").
+    pub virtual_ip: String,
 }
 
 /// Payload for exchanging ICE-like candidates between peers via the `Signal`

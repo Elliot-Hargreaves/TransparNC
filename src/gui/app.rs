@@ -193,7 +193,7 @@ impl App {
             }
 
             Message::DaemonSpawnResult(Ok(())) => {
-                self.status_line = "Daemon started — connecting…".into();
+                self.status_line = "Daemon started — connecting (retrying every 1s)…".into();
                 self.phase = Phase::Connected;
                 start_ipc_connection(self.socket_path.clone())
             }
@@ -212,9 +212,10 @@ impl App {
             }
 
             Message::DaemonConnectFailed(e) => {
-                self.status_line = format!("Connection failed: {}", e);
-                self.phase = Phase::Disconnected;
-                Task::none()
+                self.status_line = format!("Connection failed: {} — retrying…", e);
+                // Keep retrying instead of giving up, so the user has time to
+                // enter their password when the daemon is started via pkexec.
+                start_ipc_connection(self.socket_path.clone())
             }
 
             Message::DaemonEvent(event) => {
@@ -620,28 +621,16 @@ fn start_ipc_connection(socket_path: String) -> Task<Message> {
             // background thread, forwarding messages back via the sender.
             let _ = rt
                 .spawn(async move {
-                    // Retry connecting — the daemon may still be starting up.
-                    let stream = {
-                        let mut result = None;
-                        for _ in 0..20 {
-                            match UnixStream::connect(&socket_path).await {
-                                Ok(s) => {
-                                    result = Some(s);
-                                    break;
-                                }
-                                Err(_) => {
-                                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                                }
+                    // Retry connecting indefinitely with a 1-second interval so
+                    // the user has time to enter their password when the daemon
+                    // is launched via pkexec with elevated privileges.
+                    let stream = loop {
+                        match UnixStream::connect(&socket_path).await {
+                            Ok(s) => break s,
+                            Err(_) => {
+                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                             }
                         }
-                        result
-                    };
-
-                    let Some(stream) = stream else {
-                        let _ = sender.try_send(Message::DaemonConnectFailed(
-                            "Could not connect to daemon socket".into(),
-                        ));
-                        return;
                     };
 
                     let (mut reader, writer) = stream.into_split();

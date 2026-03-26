@@ -313,6 +313,7 @@ mod tests {
         PeerInfo {
             peer_id: PeerId(Uuid::new_v4()),
             public_key: "test-pubkey".to_string(),
+            virtual_ip: "172.16.0.1".to_string(),
         }
     }
 
