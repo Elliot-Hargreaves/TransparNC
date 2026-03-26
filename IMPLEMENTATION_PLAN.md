@@ -39,16 +39,16 @@ The "magic" that allows peers to connect behind firewalls.
 Creating the user-facing application using the Iced framework.
 
 - [ ] **Basic UI Layout**
-    - [ ] Main window with network status (Online/Offline).
-    - [ ] Peer list displaying names, virtual IPs, and connectivity status.
+    - [x] Main window with network status (Online/Offline).
+    - [x] Peer list displaying names, virtual IPs, and connectivity status.
     - [ ] "Join Network" and "Create Network" dialogs.
-- [ ] **Integration with Core (Tasks/Subscriptions)**
-    - [ ] Use Iced `Subscription` to listen for network events from the VPN core.
-    - [ ] Use Iced `Task` to trigger actions like "Connect" or "Disconnect" asynchronously.
-- [ ] **State Management**
-    - [ ] Implement the Elm architecture (`Message`, `State`, `Update`, `View`) to handle application flow.
+- [x] **Integration with Core (Tasks/Subscriptions)**
+    - [x] Use Iced `Subscription` to listen for network events from the VPN core.
+    - [x] Use Iced `Task` to trigger actions like "Connect" or "Disconnect" asynchronously.
+- [x] **State Management**
+    - [x] Implement the Elm architecture (`Message`, `State`, `Update`, `View`) to handle application flow.
 - [ ] **Theming & UX**
-    - [ ] Apply a clean, modern aesthetic to the UI.
+    - [x] Apply a clean, modern aesthetic to the UI.
     - [ ] System tray integration (if supported/required).
 
 ## Phase 4: Relay Server (Optional, Self-Hosted)

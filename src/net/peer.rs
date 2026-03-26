@@ -331,9 +331,10 @@ mod tests {
         let info = make_peer_info();
         let mut mgr = PeerManager::new();
         mgr.add_peer(info.clone()).unwrap();
-        assert!(mgr
-            .update_state(&info.peer_id, PeerConnectionState::Negotiating)
-            .is_ok());
+        assert!(
+            mgr.update_state(&info.peer_id, PeerConnectionState::Negotiating)
+                .is_ok()
+        );
         assert_eq!(
             mgr.get_peer(&info.peer_id).unwrap().state,
             PeerConnectionState::Negotiating
@@ -347,9 +348,10 @@ mod tests {
         mgr.add_peer(info.clone()).unwrap();
         mgr.update_state(&info.peer_id, PeerConnectionState::Negotiating)
             .unwrap();
-        assert!(mgr
-            .update_state(&info.peer_id, PeerConnectionState::Connected)
-            .is_ok());
+        assert!(
+            mgr.update_state(&info.peer_id, PeerConnectionState::Connected)
+                .is_ok()
+        );
         let entry = mgr.get_peer(&info.peer_id).unwrap();
         assert_eq!(entry.state, PeerConnectionState::Connected);
         assert!(entry.last_heartbeat.is_some());
@@ -364,9 +366,10 @@ mod tests {
             .unwrap();
         mgr.update_state(&info.peer_id, PeerConnectionState::Connected)
             .unwrap();
-        assert!(mgr
-            .update_state(&info.peer_id, PeerConnectionState::Stale)
-            .is_ok());
+        assert!(
+            mgr.update_state(&info.peer_id, PeerConnectionState::Stale)
+                .is_ok()
+        );
         assert_eq!(
             mgr.get_peer(&info.peer_id).unwrap().state,
             PeerConnectionState::Stale
@@ -384,9 +387,10 @@ mod tests {
             .unwrap();
         mgr.update_state(&info.peer_id, PeerConnectionState::Stale)
             .unwrap();
-        assert!(mgr
-            .update_state(&info.peer_id, PeerConnectionState::Disconnected)
-            .is_ok());
+        assert!(
+            mgr.update_state(&info.peer_id, PeerConnectionState::Disconnected)
+                .is_ok()
+        );
         assert_eq!(
             mgr.get_peer(&info.peer_id).unwrap().state,
             PeerConnectionState::Disconnected
@@ -404,9 +408,10 @@ mod tests {
             .unwrap();
         mgr.update_state(&info.peer_id, PeerConnectionState::Stale)
             .unwrap();
-        assert!(mgr
-            .update_state(&info.peer_id, PeerConnectionState::Connected)
-            .is_ok());
+        assert!(
+            mgr.update_state(&info.peer_id, PeerConnectionState::Connected)
+                .is_ok()
+        );
         assert_eq!(
             mgr.get_peer(&info.peer_id).unwrap().state,
             PeerConnectionState::Connected
@@ -428,9 +433,10 @@ mod tests {
         let info = make_peer_info();
         let mut mgr = PeerManager::new();
         mgr.add_peer(info.clone()).unwrap();
-        assert!(mgr
-            .update_state(&info.peer_id, PeerConnectionState::Disconnected)
-            .is_ok());
+        assert!(
+            mgr.update_state(&info.peer_id, PeerConnectionState::Disconnected)
+                .is_ok()
+        );
     }
 
     // ── PeerManager CRUD tests ──────────────────────────────────────────
