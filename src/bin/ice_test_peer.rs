@@ -6,12 +6,12 @@
 
 use anyhow::Result;
 use clap::Parser;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use tokio::net::UdpSocket;
 use transpar_nc::common::messages::{CandidateExchange, NetworkId, PeerId, SignalingMessage};
 use transpar_nc::net::ice::{
-    Candidate, CandidateType, check_connectivity, establish_connectivity, form_candidate_pairs,
-    gather_candidates,
+    Candidate, CandidateType, ProbeConfig, check_connectivity_with_config, establish_connectivity,
+    form_candidate_pairs, gather_candidates,
 };
 use transpar_nc::net::nat::{RealStunClient, StunClient};
 use uuid::Uuid;
@@ -46,6 +46,11 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     use_orchestrator: bool,
 
+    /// If set, only gather and print candidates then exit — skip connectivity checks.
+    /// Useful for STUN discovery tests where no remote peer is available.
+    #[arg(long, default_value_t = false)]
+    gather_only: bool,
+
     /// If set, also attempt a WireGuard tunnel after hole-punch succeeds.
     #[arg(long, default_value_t = false)]
     wireguard: bool,
@@ -61,6 +66,18 @@ struct Cli {
     /// Our WireGuard private key (hex) for WireGuard mode.
     #[arg(long)]
     wg_private_key: Option<String>,
+
+    /// Maximum number of probe rounds (overrides the default of 10).
+    #[arg(long)]
+    max_probe_attempts: Option<u32>,
+
+    /// Per-round probe timeout in milliseconds (overrides the default of 1000).
+    #[arg(long)]
+    probe_timeout_ms: Option<u64>,
+
+    /// Delay between probe rounds in milliseconds (overrides the default of 200).
+    #[arg(long)]
+    probe_interval_ms: Option<u64>,
 }
 
 #[tokio::main]
@@ -86,12 +103,20 @@ async fn main() -> Result<()> {
         println!("  {:?} {}", c.candidate_type, c.addr);
     }
 
+    // Short-circuit here when only candidate gathering is requested.
+    if cli.gather_only {
+        println!("ICE_TEST: --gather-only set, skipping connectivity checks.");
+        return Ok(());
+    }
+
     // --- Get remote candidates ---
     let remote_candidates = if !cli.remote_candidates.is_empty() {
         // Manual mode: remote candidates provided via CLI.
+        // Infer the candidate type from the address rather than hard-coding Host
+        // so that server-reflexive addresses are correctly classified.
         cli.remote_candidates
             .iter()
-            .map(|addr| Candidate::new(*addr, CandidateType::Host))
+            .map(|addr| Candidate::new(*addr, infer_candidate_type(addr)))
             .collect::<Vec<_>>()
     } else if let Some(ref signaling_url) = cli.signaling_url {
         // Signaling mode: exchange candidates via WebSocket.
@@ -139,8 +164,25 @@ async fn main() -> Result<()> {
             );
         }
 
-        println!("ICE_TEST: Running connectivity checks...");
-        match check_connectivity(&socket, &pairs).await {
+        // Build probe config from CLI overrides (if any).
+        let mut probe_config = ProbeConfig::default();
+        if let Some(v) = cli.max_probe_attempts {
+            probe_config.max_attempts = v;
+        }
+        if let Some(v) = cli.probe_timeout_ms {
+            probe_config.timeout = std::time::Duration::from_millis(v);
+        }
+        if let Some(v) = cli.probe_interval_ms {
+            probe_config.interval = std::time::Duration::from_millis(v);
+        }
+
+        println!(
+            "ICE_TEST: Running connectivity checks (max_attempts={}, timeout={}ms, interval={}ms)...",
+            probe_config.max_attempts,
+            probe_config.timeout.as_millis(),
+            probe_config.interval.as_millis()
+        );
+        match check_connectivity_with_config(&socket, &pairs, &probe_config).await {
             Ok(pair) => {
                 println!(
                     "ICE_TEST: SUCCESS — connected via {} <-> {}",
@@ -164,6 +206,28 @@ async fn main() -> Result<()> {
 
     println!("ICE_TEST: Done.");
     Ok(())
+}
+
+/// Infers the ICE candidate type from a socket address.
+/// Private RFC-1918 / loopback addresses are treated as Host candidates;
+/// all other addresses are assumed to be server-reflexive (STUN-derived).
+fn infer_candidate_type(addr: &SocketAddr) -> CandidateType {
+    match addr.ip() {
+        IpAddr::V4(ip) => {
+            if ip.is_loopback() || ip.is_private() || ip.is_link_local() {
+                CandidateType::Host
+            } else {
+                CandidateType::ServerReflexive
+            }
+        }
+        IpAddr::V6(ip) => {
+            if ip.is_loopback() {
+                CandidateType::Host
+            } else {
+                CandidateType::ServerReflexive
+            }
+        }
+    }
 }
 
 /// Exchanges ICE candidates with a remote peer via the signaling server.
@@ -237,6 +301,28 @@ async fn exchange_candidates_via_signaling(
                         ws.send(tokio_tungstenite::tungstenite::Message::Text(json.into()))
                             .await?;
                         println!("ICE_TEST: Sent candidates to peer {}", peer.peer_id.0);
+                    }
+                }
+                SignalingMessage::PeerJoined { peer } => {
+                    // A new peer joined after us — proactively send our candidates
+                    // so they don't have to wait for us to react to their signal.
+                    if !has_sent_to_peer {
+                        has_sent_to_peer = true;
+                        let exchange = CandidateExchange {
+                            candidates: local_candidates.to_vec(),
+                        };
+                        let signal = SignalingMessage::Signal {
+                            to: peer.peer_id,
+                            from: peer_id,
+                            data: serde_json::to_string(&exchange)?,
+                        };
+                        let json = serde_json::to_string(&signal)?;
+                        ws.send(tokio_tungstenite::tungstenite::Message::Text(json.into()))
+                            .await?;
+                        println!(
+                            "ICE_TEST: Sent candidates to newly joined peer {}",
+                            peer.peer_id.0
+                        );
                     }
                 }
                 SignalingMessage::Signal { from, data, .. } => {

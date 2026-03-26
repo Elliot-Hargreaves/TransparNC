@@ -23,6 +23,10 @@ pub enum SignalingMessage {
     },
     /// Server acknowledges join and sends current peer list.
     Joined { peers: Vec<PeerInfo> },
+    /// Server pushes a notification to existing members when a new peer joins.
+    /// Allows already-connected peers to proactively initiate candidate exchange
+    /// without waiting for the newcomer to send first.
+    PeerJoined { peer: PeerInfo },
     /// Sent to a specific peer to initiate connection (SDP/ICE candidate exchange).
     Signal {
         to: PeerId,

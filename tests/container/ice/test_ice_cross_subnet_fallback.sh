@@ -6,8 +6,9 @@
 # falls back to server-reflexive pairs (which succeed via hole-punch).
 #
 # We give peer-1 only peer-2's *private* IP as a remote candidate (which is
-# unreachable across subnets) and verify it fails. Then we give it peer-2's
-# srflx address and verify it succeeds — demonstrating the fallback logic.
+# unreachable across subnets) and verify it fails. Then we give both peers
+# each other's srflx addresses and verify hole-punch succeeds — demonstrating
+# the fallback logic.
 
 COMPOSE_FILE="${1:?Usage: $0 <compose-file>}"
 
@@ -26,40 +27,42 @@ else
     exit 1
 fi
 
-echo "--- Cross-Subnet Fallback: Step 2 — gather srflx for peer-2 ---"
+echo "--- Cross-Subnet Fallback: Step 2 — gather srflx for both peers ---"
+
+# Gather srflx addresses using --gather-only so the socket is not held open.
+PEER1_GATHER=$(docker exec ice-peer-1 timeout 20 \
+    ice_test_peer --local-port 51820 \
+    --stun-server 172.50.0.100:3478 \
+    --gather-only 2>&1)
+echo "$PEER1_GATHER"
+PEER1_SRFLX=$(echo "$PEER1_GATHER" | grep "ServerReflexive" | awk '{print $NF}')
 
 PEER2_GATHER=$(docker exec ice-peer-2 timeout 20 \
     ice_test_peer --local-port 51821 \
     --stun-server 172.50.0.100:3478 \
-    --remote-candidates 127.0.0.1:1 2>&1) || true
+    --gather-only 2>&1)
 echo "$PEER2_GATHER"
-
 PEER2_SRFLX=$(echo "$PEER2_GATHER" | grep "ServerReflexive" | awk '{print $NF}')
 
-if [ -z "$PEER2_SRFLX" ]; then
-    echo "FAILURE: Could not get peer-2 srflx address"
+if [ -z "$PEER1_SRFLX" ] || [ -z "$PEER2_SRFLX" ]; then
+    echo "FAILURE: Could not extract srflx addresses"
     exit 1
 fi
 
+echo "Peer-1 srflx: $PEER1_SRFLX"
 echo "Peer-2 srflx: $PEER2_SRFLX"
 
 echo "--- Cross-Subnet Fallback: Step 3 — srflx pair should succeed ---"
 
-# Now give peer-1 both the unreachable private IP AND the srflx address.
-# The connectivity check should fail on the private IP pair (higher priority)
-# and succeed on the srflx pair (lower priority but reachable).
+# Launch both peers concurrently so their probes overlap and NAT conntrack
+# state is created on both sides before either probe arrives.
+# Each peer gets both the unreachable private IP and the srflx address so
+# the connectivity check exercises the fallback from host to srflx pairs.
 docker exec ice-peer-1 timeout 30 \
     ice_test_peer --local-port 51820 \
     --stun-server 172.50.0.100:3478 \
     --remote-candidates "172.70.0.10:51821,$PEER2_SRFLX" 2>&1 &
 PID1=$!
-
-# Peer-2 also needs to probe back for hole-punch to work.
-PEER1_GATHER=$(docker exec ice-peer-1 timeout 20 \
-    ice_test_peer --local-port 51822 \
-    --stun-server 172.50.0.100:3478 \
-    --remote-candidates 127.0.0.1:1 2>&1) || true
-PEER1_SRFLX=$(echo "$PEER1_GATHER" | grep "ServerReflexive" | awk '{print $NF}')
 
 docker exec ice-peer-2 timeout 30 \
     ice_test_peer --local-port 51821 \

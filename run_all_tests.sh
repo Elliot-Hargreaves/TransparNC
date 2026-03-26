@@ -82,7 +82,11 @@ done
 PASSED=0
 FAILED=0
 for name in "${ORDER[@]}"; do
-    [ "${RESULTS[$name]}" = "PASS" ] && ((PASSED++)) || ((FAILED++))
+    if [ "${RESULTS[$name]}" = "PASS" ]; then
+        ((PASSED++)) || true
+    else
+        ((FAILED++)) || true
+    fi
 done
 
 echo -e "${BOLD}========================================${RESET}"

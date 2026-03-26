@@ -20,14 +20,39 @@ use tokio::net::UdpSocket;
 /// distinguished from WireGuard traffic on the same UDP socket.
 const PROBE_MAGIC: &[u8; 4] = b"TPNC";
 
-/// Number of probe rounds before giving up on a candidate pair.
-const MAX_PROBE_ATTEMPTS: u32 = 5;
+/// Default number of probe rounds before giving up on a candidate pair.
+const DEFAULT_MAX_PROBE_ATTEMPTS: u32 = 10;
 
-/// Time to wait for an ack after sending a probe.
-const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+/// Default time to wait for an ack after sending a probe.
+const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_millis(1000);
 
-/// Delay between successive probe rounds.
-const PROBE_INTERVAL: Duration = Duration::from_millis(200);
+/// Default delay between successive probe rounds.
+const DEFAULT_PROBE_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Configuration for ICE connectivity probe behaviour.
+///
+/// Allows callers to override the default probe budget — useful for lossy
+/// network conditions where more attempts or longer timeouts are needed.
+#[derive(Debug, Clone)]
+pub struct ProbeConfig {
+    /// Maximum number of probe rounds before declaring failure.
+    pub max_attempts: u32,
+    /// Per-round timeout waiting for an ack.
+    pub timeout: Duration,
+    /// Delay between successive probe rounds.
+    pub interval: Duration,
+}
+
+impl Default for ProbeConfig {
+    /// Returns the default probe configuration used for normal network conditions.
+    fn default() -> Self {
+        Self {
+            max_attempts: DEFAULT_MAX_PROBE_ATTEMPTS,
+            timeout: DEFAULT_PROBE_TIMEOUT,
+            interval: DEFAULT_PROBE_INTERVAL,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -274,43 +299,80 @@ pub async fn check_connectivity(
     socket: &UdpSocket,
     pairs: &[CandidatePair],
 ) -> Result<CandidatePair, IceError> {
+    check_connectivity_with_config(socket, pairs, &ProbeConfig::default()).await
+}
+
+/// Like [`check_connectivity`] but accepts a custom [`ProbeConfig`] to
+/// override the default probe budget. This is useful for tests that run
+/// under simulated packet loss and need a larger retry budget.
+pub async fn check_connectivity_with_config(
+    socket: &UdpSocket,
+    pairs: &[CandidatePair],
+    config: &ProbeConfig,
+) -> Result<CandidatePair, IceError> {
     if pairs.is_empty() {
         return Err(IceError::AllChecksFailed);
     }
 
     let probe_pkt = build_probe(false);
     let ack_pkt = build_probe(true);
+    let mut buf = [0u8; 64];
 
-    for round in 0..MAX_PROBE_ATTEMPTS {
-        // Send a probe to every remote candidate.
-        for pair in pairs {
-            if let Err(e) = socket.send_to(&probe_pkt, pair.remote.addr).await {
-                eprintln!("ICE: probe send to {} failed: {e}", pair.remote.addr);
-            }
-        }
+    for round in 0..config.max_attempts {
+        let deadline = tokio::time::Instant::now() + config.timeout;
 
-        // Listen for incoming probes/acks for the duration of the timeout.
-        let deadline = tokio::time::Instant::now() + PROBE_TIMEOUT;
-        let mut buf = [0u8; 64];
+        // Collect remote addresses so we can index into them without borrowing `pairs`.
+        let remote_addrs: Vec<std::net::SocketAddr> = pairs.iter().map(|p| p.remote.addr).collect();
+        let mut send_idx = 0usize;
 
+        // Interleave sends and receives so the receive path is active before the
+        // first probe hits the wire. This ensures an inbound probe from the remote
+        // peer is never silently dropped while we are still in the send phase.
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 break;
             }
 
-            match tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await {
-                Ok(Ok((n, src))) => {
-                    let data = &buf[..n];
-
-                    if is_probe(data) && !is_ack(data) {
-                        // Received a probe from the remote — send an ack back.
-                        let _ = socket.send_to(&ack_pkt, src).await;
+            if send_idx < remote_addrs.len() {
+                // Race a send against a receive so we never block on one while the
+                // other is ready.
+                tokio::select! {
+                    result = socket.recv_from(&mut buf) => {
+                        if let Ok((n, src)) = result {
+                            let data = &buf[..n];
+                            if is_probe(data) && !is_ack(data) {
+                                let _ = socket.send_to(&ack_pkt, src).await;
+                            }
+                            if is_ack(data)
+                                && let Some(pair) = pairs.iter().find(|p| p.remote.addr == src)
+                            {
+                                println!(
+                                    "ICE: connectivity check succeeded: {} <-> {}",
+                                    pair.local.addr, pair.remote.addr
+                                );
+                                return Ok(pair.clone());
+                            }
+                        }
                     }
-
-                    if is_ack(data) {
-                        // We got an ack — find the matching pair.
-                        if let Some(pair) = pairs.iter().find(|p| p.remote.addr == src) {
+                    result = socket.send_to(&probe_pkt, remote_addrs[send_idx]) => {
+                        if let Err(e) = result {
+                            eprintln!("ICE: probe send to {} failed: {e}", remote_addrs[send_idx]);
+                        }
+                        send_idx += 1;
+                    }
+                }
+            } else {
+                // All probes sent — pure receive loop until the round deadline.
+                match tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await {
+                    Ok(Ok((n, src))) => {
+                        let data = &buf[..n];
+                        if is_probe(data) && !is_ack(data) {
+                            let _ = socket.send_to(&ack_pkt, src).await;
+                        }
+                        if is_ack(data)
+                            && let Some(pair) = pairs.iter().find(|p| p.remote.addr == src)
+                        {
                             println!(
                                 "ICE: connectivity check succeeded: {} <-> {}",
                                 pair.local.addr, pair.remote.addr
@@ -318,19 +380,19 @@ pub async fn check_connectivity(
                             return Ok(pair.clone());
                         }
                     }
-                }
-                Ok(Err(e)) => {
-                    eprintln!("ICE: recv error during check: {e}");
-                }
-                Err(_) => {
-                    // Timeout — move to next round.
-                    break;
+                    Ok(Err(e)) => {
+                        eprintln!("ICE: recv error during check: {e}");
+                    }
+                    Err(_) => {
+                        // Round deadline elapsed — move to next round.
+                        break;
+                    }
                 }
             }
         }
 
-        if round < MAX_PROBE_ATTEMPTS - 1 {
-            tokio::time::sleep(PROBE_INTERVAL).await;
+        if round < config.max_attempts - 1 {
+            tokio::time::sleep(config.interval).await;
         }
     }
 
@@ -631,5 +693,98 @@ mod tests {
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let result = check_connectivity(&socket, &pairs).await;
         assert!(matches!(result.unwrap_err(), IceError::AllChecksFailed));
+    }
+
+    /// Simulates packet loss by inserting a UDP proxy between two peers that
+    /// drops every N-th packet. Verifies that the retry logic in
+    /// `check_connectivity_with_config` still succeeds despite the loss.
+    #[tokio::test]
+    async fn test_check_connectivity_simulated_loss() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        // Peer sockets — they talk through the proxy, not directly.
+        let sock_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sock_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr_a = sock_a.local_addr().unwrap();
+        let addr_b = sock_b.local_addr().unwrap();
+
+        // Proxy socket sits between the two peers.
+        let proxy = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+
+        // Drop every 3rd packet (~33% loss) — enough to exercise retries but
+        // statistically very likely to succeed within 15 rounds.
+        let counter = Arc::new(AtomicU64::new(0));
+        let drop_every_n: u64 = 3;
+
+        let proxy = Arc::new(proxy);
+        let proxy_clone = Arc::clone(&proxy);
+        let counter_clone = Arc::clone(&counter);
+
+        // Proxy task: forward packets between A and B, dropping every N-th.
+        let proxy_handle = tokio::spawn(async move {
+            let mut buf = [0u8; 256];
+            // Track which side sent the first packet so we can route correctly.
+            let mut known_a: Option<SocketAddr> = None;
+            let mut known_b: Option<SocketAddr> = None;
+            loop {
+                let (n, src) = match proxy_clone.recv_from(&mut buf).await {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+
+                // Identify sender by matching the port.
+                if src.port() == addr_a.port() {
+                    known_a = Some(src);
+                } else if src.port() == addr_b.port() {
+                    known_b = Some(src);
+                }
+
+                let seq = counter_clone.fetch_add(1, Ordering::Relaxed);
+                if seq % drop_every_n == 0 {
+                    // Drop this packet.
+                    continue;
+                }
+
+                // Forward to the other side.
+                let dest = if src.port() == addr_a.port() {
+                    known_b.unwrap_or(addr_b)
+                } else {
+                    known_a.unwrap_or(addr_a)
+                };
+                let _ = proxy_clone.send_to(&buf[..n], dest).await;
+            }
+        });
+
+        // Each peer thinks the proxy is the remote peer.
+        let candidate_a = Candidate::new(addr_a, CandidateType::Host);
+        let proxy_as_b = Candidate::new(proxy_addr, CandidateType::Host);
+        let candidate_b = Candidate::new(addr_b, CandidateType::Host);
+        let proxy_as_a = Candidate::new(proxy_addr, CandidateType::Host);
+
+        let pairs_a = vec![CandidatePair::new(candidate_a, proxy_as_b)];
+        let pairs_b = vec![CandidatePair::new(candidate_b, proxy_as_a)];
+
+        // Use a generous probe budget to tolerate the simulated loss.
+        let config = ProbeConfig {
+            max_attempts: 15,
+            timeout: Duration::from_millis(500),
+            interval: Duration::from_millis(100),
+        };
+
+        let (result_a, result_b) = tokio::join!(
+            check_connectivity_with_config(&sock_a, &pairs_a, &config),
+            check_connectivity_with_config(&sock_b, &pairs_b, &config),
+        );
+
+        // At least one side should succeed despite the packet loss.
+        assert!(
+            result_a.is_ok() || result_b.is_ok(),
+            "Expected at least one side to succeed despite ~33% simulated packet loss. \
+             A: {result_a:?}, B: {result_b:?}"
+        );
+
+        proxy_handle.abort();
     }
 }

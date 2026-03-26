@@ -7,26 +7,26 @@
 #
 # Expected: peer-1 discovers 172.50.0.10:* (nat-router-1's public IP)
 #           peer-2 discovers 172.50.0.20:* (nat-router-2's public IP)
-
 COMPOSE_FILE="${1:?Usage: $0 <compose-file>}"
 
 echo "--- STUN behind NAT: Running candidate gathering on peer-1 ---"
+# --gather-only skips the connectivity check phase entirely, making the
+# test fast and clean without needing a dummy remote candidate or || true.
 PEER1_OUTPUT=$(docker exec ice-peer-1 timeout 20 \
     ice_test_peer --local-port 51820 \
     --stun-server 172.50.0.100:3478 \
-    --remote-candidates 127.0.0.1:1 2>&1) || true
+    --gather-only 2>&1)
 echo "$PEER1_OUTPUT"
 
 echo "--- STUN behind NAT: Running candidate gathering on peer-2 ---"
 PEER2_OUTPUT=$(docker exec ice-peer-2 timeout 20 \
     ice_test_peer --local-port 51821 \
     --stun-server 172.50.0.100:3478 \
-    --remote-candidates 127.0.0.1:1 2>&1) || true
+    --gather-only 2>&1)
 echo "$PEER2_OUTPUT"
 
 # Verify peer-1 discovered a server-reflexive candidate with the NAT gateway IP.
 RESULT=0
-
 if echo "$PEER1_OUTPUT" | grep -q "ServerReflexive 172.50.0.10:"; then
     echo "SUCCESS: Peer-1 discovered srflx candidate via NAT-1 gateway (172.50.0.10)"
 else

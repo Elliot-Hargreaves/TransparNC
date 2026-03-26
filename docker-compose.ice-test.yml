@@ -26,11 +26,24 @@ services:
       public_net:
         ipv4_address: 172.50.0.100
 
+  redis:
+    image: redis:7-alpine
+    container_name: ice-redis
+    command: redis-server --appendonly no
+    networks:
+      public_net:
+        ipv4_address: 172.50.0.102
+
   signaling-server:
     container_name: ice-signaling
     build:
       context: .
       dockerfile: Dockerfile.signaling
+    environment:
+      - REDIS_URL=redis://172.50.0.102:6379
+      - LISTEN_ADDR=0.0.0.0:8080
+    depends_on:
+      - redis
     networks:
       public_net:
         ipv4_address: 172.50.0.101
@@ -53,10 +66,14 @@ services:
     command: >
       sh -c "
       apk add --no-cache iptables iproute2 &&
-      PUBLIC_IF=$$(ip -4 addr show | grep 172.50 | awk '{print $$NF}') &&
-      echo \"NAT-1 public interface: $$PUBLIC_IF\" &&
+      PUBLIC_IF=$$(ip -o -4 addr show | awk '/172\.50/{print $$2}' | head -1) &&
+      PRIVATE_IF=$$(ip -o -4 addr show | awk '/172\.60/{print $$2}' | head -1) &&
+      echo NAT-1 public=$$PUBLIC_IF private=$$PRIVATE_IF &&
       iptables -t nat -A POSTROUTING -o $$PUBLIC_IF -j MASQUERADE &&
-      echo 'NAT-1 ready' &&
+      iptables -t nat -A PREROUTING -i $$PUBLIC_IF -p udp --dport 51820:51849 -j DNAT --to-destination 172.60.0.10 &&
+      iptables -A FORWARD -i $$PUBLIC_IF -o $$PRIVATE_IF -p udp -j ACCEPT &&
+      iptables -A FORWARD -i $$PRIVATE_IF -o $$PUBLIC_IF -j ACCEPT &&
+      echo NAT-1 ready &&
       sleep 3600
       "
     depends_on:
@@ -81,10 +98,14 @@ services:
     command: >
       sh -c "
       apk add --no-cache iptables iproute2 &&
-      PUBLIC_IF=$$(ip -4 addr show | grep 172.50 | awk '{print $$NF}') &&
-      echo \"NAT-2 public interface: $$PUBLIC_IF\" &&
+      PUBLIC_IF=$$(ip -o -4 addr show | awk '/172\.50/{print $$2}' | head -1) &&
+      PRIVATE_IF=$$(ip -o -4 addr show | awk '/172\.70/{print $$2}' | head -1) &&
+      echo NAT-2 public=$$PUBLIC_IF private=$$PRIVATE_IF &&
       iptables -t nat -A POSTROUTING -o $$PUBLIC_IF -j MASQUERADE &&
-      echo 'NAT-2 ready' &&
+      iptables -t nat -A PREROUTING -i $$PUBLIC_IF -p udp --dport 51820:51849 -j DNAT --to-destination 172.70.0.10 &&
+      iptables -A FORWARD -i $$PUBLIC_IF -o $$PRIVATE_IF -p udp -j ACCEPT &&
+      iptables -A FORWARD -i $$PRIVATE_IF -o $$PUBLIC_IF -j ACCEPT &&
+      echo NAT-2 ready &&
       sleep 3600
       "
     depends_on:

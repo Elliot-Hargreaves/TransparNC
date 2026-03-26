@@ -14,7 +14,6 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use redis::AsyncCommands;
-use serde_json;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::sync::RwLock;
 use transpar_nc::common::messages::{PeerId, PeerInfo, SignalingMessage};
@@ -79,68 +78,94 @@ async fn handle_socket(socket: WebSocket, state: Arc<ServerState>) {
     let mut current_peer_id: Option<PeerId> = None;
 
     while let Some(Ok(msg)) = receiver.next().await {
-        if let Message::Text(text) = msg {
-            if let Ok(sig_msg) = serde_json::from_str::<SignalingMessage>(&text) {
-                match sig_msg {
-                    SignalingMessage::Join {
-                        network_id,
-                        peer_id,
-                        public_key,
-                    } => {
-                        current_peer_id = Some(peer_id);
+        let sig_msg = if let Message::Text(ref text) = msg {
+            serde_json::from_str::<SignalingMessage>(text).ok()
+        } else {
+            None
+        };
+        if let Some(sig_msg) = sig_msg {
+            match sig_msg {
+                SignalingMessage::Join {
+                    network_id,
+                    peer_id,
+                    public_key,
+                } => {
+                    current_peer_id = Some(peer_id);
 
-                        // Register peer in state
-                        state.active_peers.write().await.insert(peer_id, tx.clone());
+                    // Register peer in state
+                    state.active_peers.write().await.insert(peer_id, tx.clone());
 
-                        // Persist peer in Redis (with TTL)
-                        if let Ok(mut conn) = state.redis.get_multiplexed_async_connection().await {
-                            let key = format!("net:{}:peers", network_id.0);
-                            let peer_info = PeerInfo {
-                                peer_id,
-                                public_key,
-                            };
-                            let _: () = conn
-                                .hset(
-                                    key.clone(),
-                                    peer_id.0.to_string(),
-                                    serde_json::to_string(&peer_info).unwrap(),
-                                )
-                                .await
-                                .unwrap_or(());
-                            let _: () = conn.expire(key.clone(), 3600).await.unwrap_or(()); // 1 hour TTL
+                    // Persist peer in Redis (with TTL)
+                    if let Ok(mut conn) = state.redis.get_multiplexed_async_connection().await {
+                        let key = format!("net:{}:peers", network_id.0);
+                        let peer_info = PeerInfo {
+                            peer_id,
+                            public_key,
+                        };
 
-                            // Get current peers in the network
-                            if let Ok(peers_map) =
-                                conn.hgetall::<String, HashMap<String, String>>(key).await
-                            {
-                                let peers: Vec<PeerInfo> = peers_map
-                                    .values()
-                                    .filter_map(|s| serde_json::from_str(s).ok())
-                                    .collect();
+                        // Fetch existing peers *before* inserting the newcomer so we can
+                        // notify them about the new arrival and send the newcomer the
+                        // existing list separately.
+                        let existing_peers: Vec<PeerInfo> = if let Ok(peers_map) = conn
+                            .hgetall::<String, HashMap<String, String>>(key.clone())
+                            .await
+                        {
+                            peers_map
+                                .values()
+                                .filter_map(|s| serde_json::from_str(s).ok())
+                                .collect()
+                        } else {
+                            vec![]
+                        };
 
-                                let _ = tx.send(Message::Text(
-                                    serde_json::to_string(&SignalingMessage::Joined { peers })
-                                        .unwrap()
-                                        .into(),
-                                ));
+                        let _: () = conn
+                            .hset(
+                                key.clone(),
+                                peer_id.0.to_string(),
+                                serde_json::to_string(&peer_info).unwrap(),
+                            )
+                            .await
+                            .unwrap_or(());
+                        let _: () = conn.expire(key.clone(), 3600).await.unwrap_or(()); // 1 hour TTL
+
+                        // Notify the newcomer of all peers that were already present.
+                        let _ = tx.send(Message::Text(
+                            serde_json::to_string(&SignalingMessage::Joined {
+                                peers: existing_peers.clone(),
+                            })
+                            .unwrap()
+                            .into(),
+                        ));
+
+                        // Notify every existing active peer that a new peer has joined so
+                        // they can proactively initiate candidate exchange.
+                        let active = state.active_peers.read().await;
+                        let notification = serde_json::to_string(&SignalingMessage::PeerJoined {
+                            peer: peer_info,
+                        })
+                        .unwrap();
+                        for existing in &existing_peers {
+                            if let Some(existing_tx) = active.get(&existing.peer_id) {
+                                let _ =
+                                    existing_tx.send(Message::Text(notification.clone().into()));
                             }
                         }
                     }
-                    SignalingMessage::Signal { to, from, data } => {
-                        // Relay signal to target peer
-                        let peers = state.active_peers.read().await;
-                        if let Some(target_tx) = peers.get(&to) {
-                            let relay = SignalingMessage::Signal { to, from, data };
-                            let _ = target_tx
-                                .send(Message::Text(serde_json::to_string(&relay).unwrap().into()));
-                        }
-                    }
-                    SignalingMessage::Heartbeat { peer_id } => {
-                        // Extend TTL in Redis could be done here if we tracked network_id
-                        println!("Heartbeat from {:?}", peer_id);
-                    }
-                    _ => {}
                 }
+                SignalingMessage::Signal { to, from, data } => {
+                    // Relay signal to target peer
+                    let peers = state.active_peers.read().await;
+                    if let Some(target_tx) = peers.get(&to) {
+                        let relay = SignalingMessage::Signal { to, from, data };
+                        let _ = target_tx
+                            .send(Message::Text(serde_json::to_string(&relay).unwrap().into()));
+                    }
+                }
+                SignalingMessage::Heartbeat { peer_id } => {
+                    // Extend TTL in Redis could be done here if we tracked network_id
+                    println!("Heartbeat from {:?}", peer_id);
+                }
+                _ => {}
             }
         }
     }

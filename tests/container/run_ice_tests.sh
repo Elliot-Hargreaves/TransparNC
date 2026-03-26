@@ -1,6 +1,4 @@
 #!/bin/bash
-set -e
-
 # ICE Integration Test Suite
 # Runs all ICE container-based tests against the dual-NAT topology.
 #
@@ -42,8 +40,8 @@ infra_up() {
     cd "$PROJECT_DIR"
     cargo build --release
 
-    log "Building Docker images"
-    docker compose -f "$COMPOSE_FILE" build
+    log "Building Docker images (--no-cache to avoid stale binaries)"
+    docker compose -f "$COMPOSE_FILE" build --no-cache
 
     log "Starting infrastructure"
     docker compose -f "$COMPOSE_FILE" down 2>/dev/null || true

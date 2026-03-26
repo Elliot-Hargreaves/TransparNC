@@ -3,29 +3,30 @@
 #
 # Two peers behind separate NAT routers discover their srflx addresses
 # via STUN, then attempt hole-punch connectivity using each other's
-# server-reflexive candidates. Both peers run ice_test_peer concurrently.
-#
-# This is the most important ICE integration test — it verifies that
-# simultaneous UDP probes create NAT mappings that allow bidirectional
-# communication.
-
+# server-reflexive candidates. Both peers run ice_test_peer concurrently
+# in a single process invocation (gather + check in one process) so the
+# NAT conntrack state created during STUN discovery is still alive when
+# the hole-punch probes are sent.
 COMPOSE_FILE="${1:?Usage: $0 <compose-file>}"
 
 echo "--- Hole Punch NAT: Gathering STUN candidates for both peers ---"
 
-# First, gather candidates on each peer so we know their srflx addresses.
+# Use --gather-only so each peer discovers its srflx address without
+# closing the socket mid-test. The NAT mapping is created here and must
+# remain alive for the hole-punch phase, which is why gather and check
+# must happen in the same process (see Gap 2 in ICE_IMPLEMENTATION_GAPS.md).
 PEER1_GATHER=$(docker exec ice-peer-1 timeout 20 \
     ice_test_peer --local-port 51820 \
     --stun-server 172.50.0.100:3478 \
-    --remote-candidates 127.0.0.1:1 2>&1) || true
-echo "Peer-1 output:"
+    --gather-only 2>&1)
+echo "Peer-1 gather output:"
 echo "$PEER1_GATHER"
 
 PEER2_GATHER=$(docker exec ice-peer-2 timeout 20 \
     ice_test_peer --local-port 51821 \
     --stun-server 172.50.0.100:3478 \
-    --remote-candidates 127.0.0.1:1 2>&1) || true
-echo "Peer-2 output:"
+    --gather-only 2>&1)
+echo "Peer-2 gather output:"
 echo "$PEER2_GATHER"
 
 # Extract the srflx addresses.
@@ -44,9 +45,11 @@ echo "Peer-2 srflx: $PEER2_SRFLX"
 
 echo "--- Hole Punch NAT: Running concurrent hole-punch ---"
 
-# Run both peers concurrently. Each peer uses the other's srflx address
-# as the remote candidate. They must use the same local ports as during
-# STUN discovery so the NAT mappings are reusable.
+# Launch both peers concurrently in a single process each. Each peer
+# gathers candidates (re-using the same local port to hit the same NAT
+# mapping) and immediately runs connectivity checks against the other
+# peer's srflx address. Simultaneous probes ensure both NAT routers
+# create conntrack entries before either probe arrives.
 docker exec ice-peer-1 timeout 30 \
     ice_test_peer --local-port 51820 \
     --stun-server 172.50.0.100:3478 \
