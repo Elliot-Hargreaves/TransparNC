@@ -58,6 +58,7 @@ async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<ServerState>>,
 ) -> impl IntoResponse {
+    println!("[signaling] New WebSocket connection request");
     ws.on_upgrade(|socket| handle_socket(socket, state))
 }
 
@@ -76,6 +77,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<ServerState>) {
     });
 
     let mut current_peer_id: Option<PeerId> = None;
+    println!("[signaling] WebSocket connection established");
 
     while let Some(Ok(msg)) = receiver.next().await {
         let sig_msg = if let Message::Text(ref text) = msg {
@@ -84,12 +86,20 @@ async fn handle_socket(socket: WebSocket, state: Arc<ServerState>) {
             None
         };
         if let Some(sig_msg) = sig_msg {
+            println!(
+                "[signaling] Received message: {:?}",
+                std::mem::discriminant(&sig_msg)
+            );
             match sig_msg {
                 SignalingMessage::Join {
                     network_id,
                     peer_id,
                     public_key,
                 } => {
+                    println!(
+                        "[signaling] Peer {:?} joining network {:?}",
+                        peer_id, network_id
+                    );
                     current_peer_id = Some(peer_id);
 
                     // Register peer in state
@@ -153,7 +163,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<ServerState>) {
                     }
                 }
                 SignalingMessage::Signal { to, from, data } => {
-                    // Relay signal to target peer
+                    println!("[signaling] Relaying signal from {:?} to {:?}", from, to);
                     let peers = state.active_peers.read().await;
                     if let Some(target_tx) = peers.get(&to) {
                         let relay = SignalingMessage::Signal { to, from, data };
@@ -172,7 +182,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<ServerState>) {
 
     // Cleanup on disconnect
     if let Some(peer_id) = current_peer_id {
+        println!("[signaling] Peer {:?} disconnected", peer_id);
         state.active_peers.write().await.remove(&peer_id);
+    } else {
+        println!("[signaling] Anonymous WebSocket connection closed");
     }
     send_task.abort();
 }
