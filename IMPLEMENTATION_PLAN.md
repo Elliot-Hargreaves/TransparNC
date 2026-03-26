@@ -13,6 +13,7 @@ Focus on the low-level networking and establishing the automated testing infrast
     - [x] Implement cross-platform TUN interface creation using the `tun` or `tokio-tun` crate.
     - [x] Handle platform-specific configuration (IP assignment, MTU) for Linux, Windows, and macOS.
     - [x] **Test:** Create a script using Docker or Network Namespaces (Linux) to verify TUN creation and basic packet flow.
+    - [x] **Integration:** Daemon now creates and manages the `TunDevice` upon joining a network, with dynamic IP search (172.16.x.x to 172.31.x.x).
 - [x] **WireGuard Integration & Connectivity Tests**
     - [x] Integrate `boringtun` for userspace WireGuard implementation.
     - [x] Implement packet processing loop (reading from TUN -> encrypting -> sending to UDP, and vice versa).
@@ -26,6 +27,7 @@ The "magic" that allows peers to connect behind firewalls.
     - [x] Implement a basic signaling server using `axum` and WebSockets.
     - [x] Define exchange protocol for peer metadata (public keys, endpoints) in `src/common/messages.rs`.
     - [x] Integrate Redis for session persistence and state sharing.
+    - [x] Implement Docker-style IP allocation (index-based) with daemon-side subnet search.
 - [x] **NAT Discovery (STUN/TURN)**
     - [x] Integrate a STUN client to discover external IP/Port.
     - [x] Implement ICE-like candidate gathering and hole punching.

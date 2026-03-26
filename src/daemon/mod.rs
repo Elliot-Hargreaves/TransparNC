@@ -8,6 +8,7 @@ use crate::common::ipc::{
     ConnectionStatus, DaemonCommand, DaemonEvent, IpcPeerInfo, read_message, write_message,
 };
 use crate::common::messages::{NetworkId, PeerId, SignalingMessage};
+use crate::net::tun::{TunConfig, TunDevice};
 use futures_util::{SinkExt, StreamExt};
 use std::path::Path;
 use std::sync::Arc;
@@ -25,6 +26,8 @@ struct DaemonState {
     status: ConnectionStatus,
     /// Currently known peers.
     peers: Vec<IpcPeerInfo>,
+    /// The active TUN interface for the connection.
+    tun: Option<TunDevice>,
 }
 
 impl DaemonState {
@@ -33,6 +36,7 @@ impl DaemonState {
         Self {
             status: ConnectionStatus::Disconnected,
             peers: Vec::new(),
+            tun: None,
         }
     }
 }
@@ -345,42 +349,90 @@ async fn connect_to_signaling(
                 match serde_json::from_str::<SignalingMessage>(&text) {
                     Ok(SignalingMessage::Joined {
                         peers,
-                        assigned_ip,
-                        subnet,
+                        assigned_index,
                     }) => {
                         eprintln!(
-                            "[daemon] Joined network successfully, {} existing peer(s). Assigned IP: {}, Subnet: {}",
+                            "[daemon] Joined network successfully, {} existing peer(s). Assigned index: {}",
                             peers.len(),
-                            assigned_ip,
-                            subnet
+                            assigned_index
                         );
-                        let ipc_peers: Vec<IpcPeerInfo> = peers
-                            .iter()
-                            .map(|p| IpcPeerInfo {
-                                name: p.peer_id.0.to_string(),
-                                virtual_ip: p.virtual_ip.clone(),
-                                connected: false,
-                            })
-                            .collect();
-                        let mut st = state.lock().await;
-                        st.status = ConnectionStatus::Connected {
-                            virtual_ip: assigned_ip,
-                        };
-                        st.peers = ipc_peers.clone();
-                        let _ = event_tx.send(DaemonEvent::StatusUpdate {
-                            status: st.status.clone(),
-                        });
-                        let _ = event_tx.send(DaemonEvent::PeerUpdate { peers: ipc_peers });
+
+                        // Find an available 172.X.0.N IP.
+                        let mut assigned_ip = None;
+                        let mut tun_device = None;
+
+                        // Try subnets from 172.16.0.0/24 up to 172.31.0.0/24
+                        for x in 16..=31 {
+                            let ip_str = format!("172.{}.0.{}", x, assigned_index);
+                            let ip = match ip_str.parse::<std::net::Ipv4Addr>() {
+                                Ok(ip) => ip,
+                                Err(_) => continue,
+                            };
+
+                            let config = TunConfig {
+                                name: "transparnc0".to_string(),
+                                address: ip,
+                                netmask: "255.255.255.0".parse().unwrap(),
+                                mtu: 1420,
+                            };
+
+                            match TunDevice::new(config) {
+                                Ok(tun) => {
+                                    eprintln!("[daemon] Successfully created TUN device with IP {}", ip_str);
+                                    assigned_ip = Some(ip_str);
+                                    tun_device = Some(tun);
+                                    break;
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "[daemon] Failed to create TUN device with IP {}: {}. Trying next subnet...",
+                                        ip_str, e
+                                    );
+                                }
+                            }
+                        }
+
+                        if let (Some(ip), Some(tun)) = (assigned_ip, tun_device) {
+                            let ipc_peers: Vec<IpcPeerInfo> = peers
+                                .iter()
+                                .map(|p| IpcPeerInfo {
+                                    name: p.peer_id.0.to_string(),
+                                    virtual_ip: format!("172.?.0.{}", p.virtual_index),
+                                    connected: false,
+                                })
+                                .collect();
+                            let mut st = state.lock().await;
+                            st.status = ConnectionStatus::Connected {
+                                virtual_ip: ip,
+                            };
+                            st.peers = ipc_peers.clone();
+                            st.tun = Some(tun);
+                            let _ = event_tx.send(DaemonEvent::StatusUpdate {
+                                status: st.status.clone(),
+                            });
+                            let _ = event_tx.send(DaemonEvent::PeerUpdate { peers: ipc_peers });
+                        } else {
+                            eprintln!("[daemon] Could not find an available subnet for IP index {}", assigned_index);
+                            let mut st = state.lock().await;
+                            st.status = ConnectionStatus::Disconnected;
+                            let _ = event_tx.send(DaemonEvent::StatusUpdate {
+                                status: st.status.clone(),
+                            });
+                            let _ = event_tx.send(DaemonEvent::Error {
+                                message: "Failed to allocate a local virtual IP".to_string(),
+                            });
+                            return;
+                        }
                     }
                     Ok(SignalingMessage::PeerJoined { peer }) => {
                         eprintln!(
-                            "[daemon] New peer joined: {:?} with IP {}",
-                            peer.peer_id, peer.virtual_ip
+                            "[daemon] New peer joined: {:?} with index {}",
+                            peer.peer_id, peer.virtual_index
                         );
                         let mut st = state.lock().await;
                         st.peers.push(IpcPeerInfo {
                             name: peer.peer_id.0.to_string(),
-                            virtual_ip: peer.virtual_ip.clone(),
+                            virtual_ip: format!("172.?.0.{}", peer.virtual_index),
                             connected: false,
                         });
                         let _ = event_tx.send(DaemonEvent::PeerUpdate {

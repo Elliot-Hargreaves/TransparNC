@@ -28,13 +28,9 @@ struct ServerState {
     active_peers: RwLock<HashMap<PeerId, tokio::sync::mpsc::UnboundedSender<Message>>>,
     /// Tracks which peer belongs to which network for disconnect cleanup.
     peer_networks: RwLock<HashMap<PeerId, NetworkId>>,
-    /// Tracks which subnet octet (the X in 172.X.0.0/24) is assigned to each network.
-    network_subnets: RwLock<HashMap<NetworkId, u8>>,
     /// Tracks assigned client indices per network. Each slot is `Some(peer_id)` when
     /// occupied or `None` when recycled after a disconnect.
     network_allocations: RwLock<HashMap<NetworkId, Vec<Option<PeerId>>>>,
-    /// Next available subnet octet (starts at 16 to mimic Docker's 172.16+ range).
-    next_subnet_octet: RwLock<u8>,
 }
 
 #[tokio::main]
@@ -52,9 +48,7 @@ async fn main() -> anyhow::Result<()> {
         redis: redis_client,
         active_peers: RwLock::new(HashMap::new()),
         peer_networks: RwLock::new(HashMap::new()),
-        network_subnets: RwLock::new(HashMap::new()),
         network_allocations: RwLock::new(HashMap::new()),
-        next_subnet_octet: RwLock::new(16),
     });
 
     let app = Router::new()
@@ -74,24 +68,6 @@ async fn ws_handler(
 ) -> impl IntoResponse {
     println!("[signaling] New WebSocket connection request");
     ws.on_upgrade(|socket| handle_socket(socket, state))
-}
-
-/// Allocates a subnet octet for a network, reusing an existing one or assigning
-/// the next available value.
-async fn get_or_create_subnet(state: &ServerState, network_id: NetworkId) -> u8 {
-    let mut subnets = state.network_subnets.write().await;
-    if let Some(&octet) = subnets.get(&network_id) {
-        return octet;
-    }
-    let mut next = state.next_subnet_octet.write().await;
-    let octet = *next;
-    *next += 1;
-    subnets.insert(network_id, octet);
-    println!(
-        "[signaling] Assigned subnet 172.{}.0.0/24 to network {:?}",
-        octet, network_id
-    );
-    octet
 }
 
 /// Allocates a client index within a network, recycling gaps left by
@@ -163,20 +139,18 @@ async fn handle_socket(socket: WebSocket, state: Arc<ServerState>) {
                     // Register peer in active connections.
                     state.active_peers.write().await.insert(peer_id, tx.clone());
 
-                    // Allocate a virtual IP for this peer.
-                    let subnet_octet = get_or_create_subnet(&state, network_id).await;
-                    let client_index = allocate_client_index(&state, network_id, peer_id).await;
-                    let assigned_ip = format!("172.{}.0.{}", subnet_octet, client_index);
-                    let subnet = format!("172.{}.0.0/24", subnet_octet);
+                    // Allocate a virtual IP index for this peer.
+                    let client_index =
+                        allocate_client_index(&state, network_id, peer_id).await as u8;
                     println!(
-                        "[signaling] Assigned IP {} (subnet {}) to peer {:?}",
-                        assigned_ip, subnet, peer_id
+                        "[signaling] Assigned index {} to peer {:?}",
+                        client_index, peer_id
                     );
 
                     let peer_info = PeerInfo {
                         peer_id,
                         public_key,
-                        virtual_ip: assigned_ip.clone(),
+                        virtual_index: client_index,
                     };
 
                     // Persist peer in Redis (with TTL).
@@ -210,8 +184,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<ServerState>) {
                         let _ = tx.send(Message::Text(
                             serde_json::to_string(&SignalingMessage::Joined {
                                 peers: existing_peers.clone(),
-                                assigned_ip,
-                                subnet,
+                                assigned_index: client_index,
                             })
                             .unwrap()
                             .into(),
