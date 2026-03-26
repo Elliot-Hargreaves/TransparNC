@@ -100,8 +100,6 @@ enum Phase {
     StartingDaemon,
     /// Connected to the daemon and operational.
     Connected,
-    /// The daemon has shut down (or we lost the connection).
-    Disconnected,
 }
 
 // ── Messages ───────────────────────────────────────────────────────────────
@@ -224,8 +222,11 @@ impl App {
             }
 
             Message::DaemonConnectionLost => {
-                self.phase = Phase::Disconnected;
+                self.phase = Phase::PromptStartDaemon;
                 self.writer = None;
+                self.connection_status = ConnectionStatus::Disconnected;
+                self.peers.clear();
+                self.network_dialog = None;
                 self.status_line = "Lost connection to daemon.".into();
                 Task::none()
             }
@@ -371,8 +372,11 @@ impl App {
                 self.status_line = format!("Daemon error: {}", message);
             }
             DaemonEvent::ShuttingDown => {
-                self.phase = Phase::Disconnected;
+                self.phase = Phase::PromptStartDaemon;
                 self.writer = None;
+                self.connection_status = ConnectionStatus::Disconnected;
+                self.peers.clear();
+                self.network_dialog = None;
                 self.status_line = "Daemon has shut down.".into();
             }
         }
@@ -405,7 +409,7 @@ impl App {
 
             Phase::StartingDaemon => center(text("Starting daemon…").size(20)).into(),
 
-            Phase::Connected | Phase::Disconnected => self.main_view(),
+            Phase::Connected => self.main_view(),
         };
 
         let status_bar = container(text(&self.status_line).size(13))
