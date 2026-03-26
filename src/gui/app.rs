@@ -8,7 +8,9 @@
 use crate::common::ipc::{
     ConnectionStatus, DaemonCommand, DaemonEvent, IpcPeerInfo, read_message, write_message,
 };
-use iced::widget::{Space, button, center, column, container, row, scrollable, text};
+use iced::widget::{
+    Space, button, center, checkbox, column, container, row, scrollable, text, text_input,
+};
 use iced::{Element, Fill, Task, Theme};
 use std::sync::Arc;
 use tokio::net::UnixStream;
@@ -30,6 +32,61 @@ pub struct App {
     writer: Option<Arc<Mutex<tokio::net::unix::OwnedWriteHalf>>>,
     /// Human-readable log / status line shown at the bottom.
     status_line: String,
+    /// State for the network dialog (join or create).
+    network_dialog: Option<NetworkDialog>,
+}
+
+/// Default signaling server FQDN.
+const DEFAULT_SIGNALING_HOST: &str = "coffy.dev";
+
+/// Default signaling server port.
+const DEFAULT_SIGNALING_PORT: u16 = 8080;
+
+/// Tracks which kind of network dialog is open and its input fields.
+#[derive(Debug, Clone)]
+struct NetworkDialog {
+    /// Whether the user is joining or creating a network.
+    kind: NetworkDialogKind,
+    /// The network identifier (for join) or desired name (for create).
+    network_input: String,
+    /// Signaling server FQDN (without port).
+    signaling_host: String,
+    /// Signaling server port.
+    signaling_port: String,
+    /// When true the default server (`coffy.dev:8080`) is used and the
+    /// host/port fields are not editable.
+    use_default_server: bool,
+}
+
+/// Distinguishes between the two network dialog modes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NetworkDialogKind {
+    /// The user wants to join an existing network.
+    Join,
+    /// The user wants to create a new network.
+    Create,
+}
+
+impl NetworkDialog {
+    /// Creates a new dialog with defaults pre-filled.
+    fn new(kind: NetworkDialogKind) -> Self {
+        Self {
+            kind,
+            network_input: String::new(),
+            signaling_host: DEFAULT_SIGNALING_HOST.to_string(),
+            signaling_port: DEFAULT_SIGNALING_PORT.to_string(),
+            use_default_server: true,
+        }
+    }
+
+    /// Returns the `host:port` signaling server address.
+    fn signaling_address(&self) -> String {
+        format!(
+            "{}:{}",
+            self.signaling_host.trim(),
+            self.signaling_port.trim()
+        )
+    }
 }
 
 /// Lifecycle phases of the GUI.
@@ -70,6 +127,22 @@ pub enum Message {
     ShutdownDaemon,
     /// A command was sent (or failed) — used to surface errors.
     CommandSent(Result<(), String>),
+    /// User opened the "Join Network" dialog.
+    OpenJoinDialog,
+    /// User opened the "Create Network" dialog.
+    OpenCreateDialog,
+    /// User closed the network dialog without submitting.
+    CloseNetworkDialog,
+    /// The network name/ID input field changed.
+    NetworkInputChanged(String),
+    /// The signaling server host input field changed.
+    SignalingHostChanged(String),
+    /// The signaling server port input field changed.
+    SignalingPortChanged(String),
+    /// The "use default server" checkbox was toggled.
+    UseDefaultServerToggled(bool),
+    /// User submitted the network dialog (join or create).
+    SubmitNetworkDialog,
 }
 
 // ── Construction ───────────────────────────────────────────────────────────
@@ -84,6 +157,7 @@ impl App {
             socket_path: socket_path.clone(),
             writer: None,
             status_line: "Checking for running daemon…".into(),
+            network_dialog: None,
         };
         let task = Task::perform(check_daemon(socket_path), Message::DaemonCheckResult);
         (app, task)
@@ -185,6 +259,100 @@ impl App {
                 self.status_line = format!("Command error: {}", e);
                 Task::none()
             }
+
+            Message::OpenJoinDialog => {
+                self.network_dialog = Some(NetworkDialog::new(NetworkDialogKind::Join));
+                Task::none()
+            }
+
+            Message::OpenCreateDialog => {
+                self.network_dialog = Some(NetworkDialog::new(NetworkDialogKind::Create));
+                Task::none()
+            }
+
+            Message::CloseNetworkDialog => {
+                self.network_dialog = None;
+                Task::none()
+            }
+
+            Message::NetworkInputChanged(value) => {
+                if let Some(dialog) = &mut self.network_dialog {
+                    dialog.network_input = value;
+                }
+                Task::none()
+            }
+
+            Message::SignalingHostChanged(value) => {
+                if let Some(dialog) = &mut self.network_dialog {
+                    dialog.signaling_host = value;
+                }
+                Task::none()
+            }
+
+            Message::SignalingPortChanged(value) => {
+                if let Some(dialog) = &mut self.network_dialog {
+                    dialog.signaling_port = value;
+                }
+                Task::none()
+            }
+
+            Message::UseDefaultServerToggled(checked) => {
+                if let Some(dialog) = &mut self.network_dialog {
+                    dialog.use_default_server = checked;
+                    if checked {
+                        dialog.signaling_host = DEFAULT_SIGNALING_HOST.to_string();
+                        dialog.signaling_port = DEFAULT_SIGNALING_PORT.to_string();
+                    }
+                }
+                Task::none()
+            }
+
+            Message::SubmitNetworkDialog => self.submit_network_dialog(),
+        }
+    }
+
+    /// Builds the signaling server address from the current dialog state and
+    /// sends the appropriate `DaemonCommand` to the daemon.
+    fn submit_network_dialog(&mut self) -> Task<Message> {
+        let dialog = match self.network_dialog.take() {
+            Some(d) => d,
+            None => return Task::none(),
+        };
+
+        if dialog.network_input.trim().is_empty() {
+            self.status_line = "Please enter a network name / ID.".into();
+            self.network_dialog = Some(dialog);
+            return Task::none();
+        }
+
+        let signaling_server = dialog.signaling_address();
+
+        let command = match dialog.kind {
+            NetworkDialogKind::Join => DaemonCommand::JoinNetwork {
+                network_id: dialog.network_input.trim().to_string(),
+                signaling_server,
+            },
+            NetworkDialogKind::Create => DaemonCommand::CreateNetwork {
+                network_name: dialog.network_input.trim().to_string(),
+                signaling_server,
+            },
+        };
+
+        self.status_line = format!("Sending {:?}…", command);
+
+        if let Some(writer) = self.writer.clone() {
+            Task::perform(
+                async move {
+                    let mut w = writer.lock().await;
+                    write_message(&mut w, &command)
+                        .await
+                        .map_err(|e| e.to_string())
+                },
+                Message::CommandSent,
+            )
+        } else {
+            self.status_line = "Not connected to daemon.".into();
+            Task::none()
         }
     }
 
@@ -247,6 +415,9 @@ impl App {
     }
 
     /// The main operational view shown once connected to the daemon.
+    ///
+    /// When a network dialog is open it is rendered in place of the peer list
+    /// so the user can fill in the signaling server details.
     fn main_view(&self) -> Element<'_, Message> {
         let status_text = match &self.connection_status {
             ConnectionStatus::Disconnected => "Disconnected".to_string(),
@@ -263,7 +434,39 @@ impl App {
         ]
         .padding(10);
 
-        let peer_list: Element<'_, Message> = if self.peers.is_empty() {
+        // Either show the network dialog or the normal peer list.
+        let body: Element<'_, Message> = if let Some(dialog) = &self.network_dialog {
+            self.network_dialog_view(dialog)
+        } else {
+            self.peer_list_view()
+        };
+
+        let controls = if self.network_dialog.is_some() {
+            // While a dialog is open the bottom bar only shows Cancel.
+            row![
+                Space::new().width(Fill),
+                button(text("Cancel")).on_press(Message::CloseNetworkDialog),
+            ]
+            .padding(10)
+        } else {
+            row![
+                button(text("Join Network")).on_press(Message::OpenJoinDialog),
+                Space::new().width(8),
+                button(text("Create Network")).on_press(Message::OpenCreateDialog),
+                Space::new().width(Fill),
+                button(text("Shutdown Daemon"))
+                    .on_press(Message::ShutdownDaemon)
+                    .style(button::danger),
+            ]
+            .padding(10)
+        };
+
+        column![header, body, controls].height(Fill).into()
+    }
+
+    /// Renders the peer list (default body when no dialog is open).
+    fn peer_list_view(&self) -> Element<'_, Message> {
+        if self.peers.is_empty() {
             center(text("No peers connected.").size(14)).into()
         } else {
             let items = self
@@ -283,17 +486,76 @@ impl App {
                     )
                 });
             scrollable(items).height(Fill).into()
+        }
+    }
+
+    /// Renders the join / create network dialog form.
+    fn network_dialog_view(&self, dialog: &NetworkDialog) -> Element<'_, Message> {
+        let title = match dialog.kind {
+            NetworkDialogKind::Join => "Join Network",
+            NetworkDialogKind::Create => "Create Network",
         };
 
-        let controls = row![
-            Space::new().width(Fill),
-            button(text("Shutdown Daemon"))
-                .on_press(Message::ShutdownDaemon)
-                .style(button::danger),
-        ]
-        .padding(10);
+        let network_label = match dialog.kind {
+            NetworkDialogKind::Join => "Network ID",
+            NetworkDialogKind::Create => "Network Name",
+        };
 
-        column![header, peer_list, controls].height(Fill).into()
+        let network_field = text_input(network_label, &dialog.network_input)
+            .on_input(Message::NetworkInputChanged)
+            .padding(8);
+
+        let use_default = checkbox(dialog.use_default_server)
+            .label(format!(
+                "Use default server ({}:{})",
+                DEFAULT_SIGNALING_HOST, DEFAULT_SIGNALING_PORT
+            ))
+            .on_toggle(Message::UseDefaultServerToggled);
+
+        let mut form = column![
+            text(title).size(22),
+            Space::new().height(12),
+            text(network_label).size(14),
+            network_field,
+            Space::new().height(12),
+            use_default,
+        ]
+        .spacing(4)
+        .padding(16);
+
+        // Only show host/port fields when the user opts out of the default.
+        if !dialog.use_default_server {
+            let host_field = text_input("Signaling server FQDN", &dialog.signaling_host)
+                .on_input(Message::SignalingHostChanged)
+                .padding(8);
+
+            let port_field = text_input("Port", &dialog.signaling_port)
+                .on_input(Message::SignalingPortChanged)
+                .padding(8);
+
+            form = form
+                .push(Space::new().height(8))
+                .push(text("Signaling Server").size(14))
+                .push(row![
+                    host_field,
+                    Space::new().width(8),
+                    container(port_field).width(100),
+                ]);
+        }
+
+        let submit_label = match dialog.kind {
+            NetworkDialogKind::Join => "Join",
+            NetworkDialogKind::Create => "Create",
+        };
+
+        form = form.push(Space::new().height(16)).push(row![
+            Space::new().width(Fill),
+            button(text(submit_label))
+                .on_press(Message::SubmitNetworkDialog)
+                .style(button::primary),
+        ]);
+
+        container(form).width(Fill).height(Fill).padding(8).into()
     }
 
     /// Returns the dark theme.

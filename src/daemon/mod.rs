@@ -196,5 +196,35 @@ async fn handle_command(
             // Signal the accept loop to exit.
             let _ = shutdown_tx.send(true);
         }
+        DaemonCommand::JoinNetwork {
+            network_id,
+            signaling_server,
+        } => {
+            eprintln!(
+                "[daemon] Join network '{}' via signaling server '{}'",
+                network_id, signaling_server
+            );
+            let mut st = state.lock().await;
+            st.status = ConnectionStatus::Connecting;
+            let _ = event_tx.send(DaemonEvent::StatusUpdate {
+                status: st.status.clone(),
+            });
+            // TODO: connect to signaling server and join the network.
+        }
+        DaemonCommand::CreateNetwork {
+            network_name,
+            signaling_server,
+        } => {
+            eprintln!(
+                "[daemon] Create network '{}' via signaling server '{}'",
+                network_name, signaling_server
+            );
+            let mut st = state.lock().await;
+            st.status = ConnectionStatus::Connecting;
+            let _ = event_tx.send(DaemonEvent::StatusUpdate {
+                status: st.status.clone(),
+            });
+            // TODO: connect to signaling server and create the network.
+        }
     }
 }

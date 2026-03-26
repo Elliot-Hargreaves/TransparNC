@@ -19,6 +19,20 @@ pub enum DaemonCommand {
         /// Human-readable or UUID network identifier.
         network_id: String,
     },
+    /// Join an existing network via a signaling server.
+    JoinNetwork {
+        /// Network identifier to join.
+        network_id: String,
+        /// Signaling server address (FQDN with optional port, e.g. "coffy.dev:8080").
+        signaling_server: String,
+    },
+    /// Create a new network on a signaling server.
+    CreateNetwork {
+        /// Desired network name.
+        network_name: String,
+        /// Signaling server address (FQDN with optional port, e.g. "coffy.dev:8080").
+        signaling_server: String,
+    },
     /// Disconnect from the current network.
     Disconnect,
     /// Tear down TUN devices and shut the daemon down gracefully.

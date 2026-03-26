@@ -41,7 +41,7 @@ Creating the user-facing application using the Iced framework.
 - [ ] **Basic UI Layout**
     - [x] Main window with network status (Online/Offline).
     - [x] Peer list displaying names, virtual IPs, and connectivity status.
-    - [ ] "Join Network" and "Create Network" dialogs.
+    - [x] "Join Network" and "Create Network" dialogs.
 - [x] **Integration with Core (Tasks/Subscriptions)**
     - [x] Use Iced `Subscription` to listen for network events from the VPN core.
     - [x] Use Iced `Task` to trigger actions like "Connect" or "Disconnect" asynchronously.
