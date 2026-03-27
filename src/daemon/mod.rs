@@ -536,36 +536,14 @@ async fn connect_to_signaling(
                                 SignalingMessage::Signal { from, data, .. } => {
                                     eprintln!("[daemon] Signal from {:?}", from);
                                     if let Ok(ex) = serde_json::from_str::<CandidateExchange>(&data) {
-                                        // Guard: only start ICE if the peer is still in the
-                                        // `Discovered` state. Transitioning to `Negotiating`
-                                        // atomically (while holding the lock) ensures that a
-                                        // second Signal arriving concurrently is also rejected,
-                                        // preventing the ping-pong feedback loop where each side
-                                        // responds to the other's candidates indefinitely.
-                                        let should_handle = {
-                                            let st = state.lock().await;
-                                            if let Some(pm) = &st.peer_manager {
-                                                let mut mgr = pm.lock().await;
-                                                if let Some(entry) = mgr.get_peer(&from) {
-                                                    if entry.state == PeerConnectionState::Discovered {
-                                                        let _ = mgr.update_state(&from, PeerConnectionState::Negotiating);
-                                                        true
-                                                    } else {
-                                                        eprintln!(
-                                                            "[daemon] Ignoring duplicate Signal from {:?} (state: {})",
-                                                            from, entry.state
-                                                        );
-                                                        false
-                                                    }
-                                                } else {
-                                                    false
-                                                }
-                                            } else {
-                                                false
-                                            }
-                                        };
-
-                                        if should_handle {
+                                        if ex.candidates.is_empty() {
+                                            // This is a trigger signal — the remote peer is telling
+                                            // us to start our ICE flow. Spawn handle_peer_signal to
+                                            // gather our candidates and send them back, but do NOT
+                                            // touch the peer state here. The peer stays in
+                                            // `Discovered` so that when the remote peer responds
+                                            // with its real candidates the guard below will accept
+                                            // that Signal and run the actual ICE check.
                                             let st_c = state.clone();
                                             let priv_c = static_private.clone();
                                             let stun_server_c = stun_server.clone();
@@ -574,7 +552,7 @@ async fn connect_to_signaling(
                                             tokio::spawn(async move {
                                                 handle_peer_signal(
                                                     from,
-                                                    ex.candidates,
+                                                    vec![],
                                                     priv_c,
                                                     stun_server_c,
                                                     st_c,
@@ -582,6 +560,53 @@ async fn connect_to_signaling(
                                                     event_tx_c,
                                                 ).await;
                                             });
+                                        } else {
+                                            // This is a real signal with actual candidates. Only
+                                            // proceed if the peer is in `Discovered` state, and
+                                            // atomically transition to `Negotiating` to prevent a
+                                            // ping-pong loop where each side responds to the
+                                            // other's candidates indefinitely.
+                                            let should_handle = {
+                                                let st = state.lock().await;
+                                                if let Some(pm) = &st.peer_manager {
+                                                    let mut mgr = pm.lock().await;
+                                                    if let Some(entry) = mgr.get_peer(&from) {
+                                                        if entry.state == PeerConnectionState::Discovered {
+                                                            let _ = mgr.update_state(&from, PeerConnectionState::Negotiating);
+                                                            true
+                                                        } else {
+                                                            eprintln!(
+                                                                "[daemon] Ignoring duplicate Signal from {:?} (state: {})",
+                                                                from, entry.state
+                                                            );
+                                                            false
+                                                        }
+                                                    } else {
+                                                        false
+                                                    }
+                                                } else {
+                                                    false
+                                                }
+                                            };
+
+                                            if should_handle {
+                                                let st_c = state.clone();
+                                                let priv_c = static_private.clone();
+                                                let stun_server_c = stun_server.clone();
+                                                let peer_signal_tx_c = peer_signal_tx.clone();
+                                                let event_tx_c = event_tx.clone();
+                                                tokio::spawn(async move {
+                                                    handle_peer_signal(
+                                                        from,
+                                                        ex.candidates,
+                                                        priv_c,
+                                                        stun_server_c,
+                                                        st_c,
+                                                        peer_signal_tx_c,
+                                                        event_tx_c,
+                                                    ).await;
+                                                });
+                                            }
                                         }
                                     }
                                 }
