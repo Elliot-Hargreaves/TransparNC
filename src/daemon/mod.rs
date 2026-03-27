@@ -15,10 +15,11 @@ use crate::net::tun::{TunConfig, TunDevice};
 use crate::net::wireguard::{KeyPair, WireGuardPeer};
 use crate::net::{SharedTunWriter, TunDispatcherHandle, split_tun};
 use futures_util::{SinkExt, StreamExt};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::net::{UdpSocket, UnixListener, UnixStream};
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 use tokio_tungstenite::tungstenite;
 use uuid::Uuid;
 
@@ -37,6 +38,11 @@ struct DaemonState {
     tun_writer: Option<SharedTunWriter>,
     /// Shared peer manager across all per-peer engines.
     peer_manager: Option<Arc<Mutex<PeerManager>>>,
+    /// Per-peer shutdown senders keyed by virtual_index.
+    ///
+    /// Dropping or firing these causes the corresponding `VpnEngine` to exit,
+    /// preventing stale WireGuard handshake attempts to a departed peer's endpoint.
+    engine_shutdown: HashMap<u8, oneshot::Sender<()>>,
 }
 
 impl DaemonState {
@@ -48,6 +54,7 @@ impl DaemonState {
             tun_dispatcher: None,
             tun_writer: None,
             peer_manager: None,
+            engine_shutdown: HashMap::new(),
         }
     }
 }
@@ -555,7 +562,19 @@ async fn connect_to_signaling(
                                 SignalingMessage::PeerLeft { peer_id: p_id } => {
                                     log::info!("[daemon] Peer left: {:?}", p_id);
                                     let mut st = state.lock().await;
+                                    // Resolve virtual_index before removing the peer so we can
+                                    // shut down its VpnEngine and stop stale handshake attempts.
+                                    let virtual_index = st.peers.iter()
+                                        .find(|p| p.name == p_id.0.to_string())
+                                        .and_then(|p| p.virtual_ip.split('.').last()
+                                            .and_then(|s| s.parse::<u8>().ok()));
                                     st.peers.retain(|p| p.name != p_id.0.to_string());
+                                    if let Some(idx) = virtual_index {
+                                        if let Some(tx) = st.engine_shutdown.remove(&idx) {
+                                            let _ = tx.send(());
+                                            log::debug!("[daemon] Sent shutdown to VpnEngine for index {}", idx);
+                                        }
+                                    }
                                     let _ = event_tx.send(DaemonEvent::PeerUpdate { peers: st.peers.clone() });
                                 }
                                 SignalingMessage::Signal { from, data, .. } => {
@@ -844,6 +863,14 @@ async fn handle_peer_signal(
             // Register this peer with the TUN dispatcher to get a dedicated packet channel.
             let tun_rx = tun_dispatcher.register(virtual_index).await;
 
+            // Create a shutdown channel so the VpnEngine can be cancelled when
+            // the peer leaves the network (see PeerLeft handler).
+            let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+            {
+                let mut st = state.lock().await;
+                st.engine_shutdown.insert(virtual_index, shutdown_tx);
+            }
+
             // Start the per-peer VpnEngine — the ICE socket is now the data-plane socket.
             let engine = crate::net::VpnEngine::new(
                 tun_rx,
@@ -854,7 +881,7 @@ async fn handle_peer_signal(
                 virtual_index,
             );
             tokio::spawn(async move {
-                if let Err(e) = engine.run().await {
+                if let Err(e) = engine.run(shutdown_rx).await {
                     log::error!("[daemon] VpnEngine error for {:?}: {}", from, e);
                 }
             });

@@ -187,7 +187,11 @@ impl VpnEngine {
     ///   TUN dispatcher), WireGuard-encapsulates them, and sends them over UDP.
     /// - UDP→TUN: receives encrypted packets from the peer, decapsulates them,
     ///   and writes the plaintext IP packets back to the TUN interface.
-    pub async fn run(self) -> anyhow::Result<()> {
+    ///
+    /// The `shutdown_rx` oneshot receiver allows the caller to cancel this engine
+    /// (e.g. when the remote peer leaves the network), preventing stale WireGuard
+    /// handshake attempts to a gone endpoint.
+    pub async fn run(self, shutdown_rx: tokio::sync::oneshot::Receiver<()>) -> anyhow::Result<()> {
         let wg_peer = self.wg_peer.clone();
         let udp = self.udp.clone();
         let mut tun_rx = self.tun_rx;
@@ -323,7 +327,17 @@ impl VpnEngine {
             })
         };
 
-        let _ = tokio::try_join!(tun_to_udp, udp_to_tun, heartbeat_checker);
+        // Wait for any loop to finish, or for an explicit shutdown signal.
+        // The shutdown path is taken when the remote peer leaves the network so
+        // we stop sending WireGuard handshakes to a now-gone endpoint.
+        tokio::select! {
+            _ = tun_to_udp => {}
+            _ = udp_to_tun => {}
+            _ = heartbeat_checker => {}
+            _ = shutdown_rx => {
+                log::info!("[vpn] Shutdown signal received for peer index {}", virtual_index);
+            }
+        }
         Ok(())
     }
 }
