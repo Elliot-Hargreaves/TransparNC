@@ -7,9 +7,15 @@
 
 use clap::Parser;
 
+shadow_rs::shadow!(build);
+
 /// TransparNC — Peer-to-peer VPN.
 #[derive(Parser, Debug)]
-#[command(name = "transparnc", version, about)]
+#[command(
+    name = "transparnc",
+    version = &*Box::leak(format!("{} ({} {})", env!("CARGO_PKG_VERSION"), &build::SHORT_COMMIT[..7], build::BUILD_TIME_2822).into_boxed_str()),
+    about
+)]
 struct Cli {
     /// Run in daemon mode (privileged — handles TUN/WireGuard).
     #[arg(long)]

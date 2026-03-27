@@ -8,6 +8,7 @@
 use crate::common::ipc::{
     ConnectionStatus, DaemonCommand, DaemonEvent, IpcPeerInfo, read_message, write_message,
 };
+shadow_rs::shadow!(build);
 use iced::widget::{
     Space, button, center, checkbox, column, container, row, scrollable, text, text_input,
 };
@@ -434,8 +435,18 @@ impl App {
             }
         };
 
+        let version_info = format!(
+            "v{} ({}, {})",
+            build::PKG_VERSION,
+            &build::SHORT_COMMIT[..7],
+            build::BUILD_TIME_2822
+        );
+
         let header = row![
-            text("TransparNC").size(24),
+            column![
+                text("TransparNC").size(24),
+                text(version_info).size(12).style(text::secondary),
+            ],
             Space::new().width(Fill),
             text(status_text.clone()).size(16),
         ]

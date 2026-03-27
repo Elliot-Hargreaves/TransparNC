@@ -24,3 +24,7 @@ uuid = { version = "1.15", features = ["v4", "serde"] }
 stun = "0.7"
 async-trait = "0.1"
 if-addrs = "0.13"
+shadow-rs = "0.38"
+
+[build-dependencies]
+shadow-rs = "0.38"
