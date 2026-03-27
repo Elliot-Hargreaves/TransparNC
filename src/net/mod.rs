@@ -276,6 +276,24 @@ impl VpnEngine {
                         TunnResult::WriteToNetwork(packet) => {
                             // WireGuard handshake response — send it back.
                             let _ = udp.send_to(packet, addr).await;
+
+                            // After a handshake completes, boringtun internally queues the
+                            // first data packet that triggered the handshake. We must drain
+                            // that queue immediately; otherwise the queued packet stalls until
+                            // the next TUN packet arrives (typically a TCP retransmit, ~1–3s).
+                            // This covers both initial connections and reconnects after session
+                            // key expiry.
+                            if let Some(endpoint) = peer.endpoint() {
+                                let mut flush_out = [0u8; 2048];
+                                loop {
+                                    match peer.encapsulate(&[], &mut flush_out) {
+                                        TunnResult::WriteToNetwork(flushed) => {
+                                            let _ = udp.send_to(flushed, endpoint).await;
+                                        }
+                                        _ => break,
+                                    }
+                                }
+                            }
                         }
                         TunnResult::Err(e) => {
                             log::warn!("[vpn] WG decapsulation error from {}: {:?}", addr, e);
