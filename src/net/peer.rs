@@ -6,7 +6,9 @@
 
 use crate::common::messages::{PeerId, PeerInfo};
 use std::collections::HashMap;
+use std::sync::Arc;
 use thiserror::Error;
+use tokio::net::UdpSocket;
 use tokio::time::Instant;
 
 /// Errors that can occur during peer management operations.
@@ -110,6 +112,11 @@ pub struct PeerEntry {
     /// Timestamp of the last received heartbeat or data packet.
     /// `None` if the peer has never been in the `Connected` state.
     pub last_heartbeat: Option<Instant>,
+    /// Socket and local candidates gathered during the trigger-signal phase.
+    /// Stored here so the real ICE run can reuse the same socket and
+    /// already-gathered candidates without performing a second STUN request.
+    /// Taken out (set to `None`) when the real signal arrives.
+    pub ice_state: Option<(Arc<UdpSocket>, Vec<crate::net::ice::Candidate>)>,
 }
 
 impl PeerEntry {
@@ -120,6 +127,7 @@ impl PeerEntry {
             info,
             state: PeerConnectionState::Discovered,
             last_heartbeat: None,
+            ice_state: None,
         }
     }
 }

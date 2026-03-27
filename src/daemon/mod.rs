@@ -537,55 +537,70 @@ async fn connect_to_signaling(
                                     eprintln!("[daemon] Signal from {:?}", from);
                                     if let Ok(ex) = serde_json::from_str::<CandidateExchange>(&data) {
                                         if ex.candidates.is_empty() {
-                                            // This is a trigger signal — the remote peer is telling
-                                            // us to start our ICE flow. Spawn handle_peer_signal to
-                                            // gather our candidates and send them back, but do NOT
-                                            // touch the peer state here. The peer stays in
-                                            // `Discovered` so that when the remote peer responds
-                                            // with its real candidates the guard below will accept
-                                            // that Signal and run the actual ICE check.
+                                            // Trigger signal — the remote peer is telling us to
+                                            // start our ICE flow. Bind the data-plane socket now,
+                                            // do STUN once, send our candidates back, and store
+                                            // the socket + candidates in PeerEntry.ice_state so
+                                            // the real ICE run can reuse them without a second
+                                            // STUN request. The peer stays in `Discovered` so
+                                            // the real signal passes the guard below.
                                             let st_c = state.clone();
-                                            let priv_c = static_private.clone();
                                             let stun_server_c = stun_server.clone();
                                             let peer_signal_tx_c = peer_signal_tx.clone();
-                                            let event_tx_c = event_tx.clone();
                                             tokio::spawn(async move {
-                                                handle_peer_signal(
+                                                let ice_socket = match UdpSocket::bind("0.0.0.0:0").await {
+                                                    Ok(s) => Arc::new(s),
+                                                    Err(e) => {
+                                                        eprintln!("[daemon] Failed to bind trigger socket for {:?}: {}", from, e);
+                                                        return;
+                                                    }
+                                                };
+                                                let (local_candidates, candidates_json) =
+                                                    gather_candidates_for_socket(&ice_socket, &stun_server_c).await;
+                                                eprintln!(
+                                                    "[daemon] Trigger signal from {:?}: sending candidates (port {}), awaiting real candidates to start ICE.",
                                                     from,
-                                                    vec![],
-                                                    priv_c,
-                                                    stun_server_c,
-                                                    st_c,
-                                                    peer_signal_tx_c,
-                                                    event_tx_c,
-                                                ).await;
+                                                    ice_socket.local_addr().map(|a| a.port()).unwrap_or(0)
+                                                );
+                                                let _ = peer_signal_tx_c.send((from, candidates_json)).await;
+                                                // Store the socket and candidates so the real ICE
+                                                // path can take them without rebinding or re-STUNing.
+                                                let st = st_c.lock().await;
+                                                if let Some(pm) = &st.peer_manager {
+                                                    let mut mgr = pm.lock().await;
+                                                    if let Some(entry) = mgr.get_peer_mut(&from) {
+                                                        entry.ice_state = Some((ice_socket, local_candidates));
+                                                    }
+                                                }
                                             });
                                         } else {
-                                            // This is a real signal with actual candidates. Only
-                                            // proceed if the peer is in `Discovered` state, and
-                                            // atomically transition to `Negotiating` to prevent a
-                                            // ping-pong loop where each side responds to the
-                                            // other's candidates indefinitely.
-                                            let should_handle = {
+                                            // Real signal with actual candidates. Only proceed if
+                                            // the peer is in `Discovered` state, atomically
+                                            // transitioning to `Negotiating` to prevent a
+                                            // ping-pong loop. Take the stored ice_state (socket +
+                                            // candidates from the trigger phase) so we don't need
+                                            // a second STUN request.
+                                            let (should_handle, stored_ice_state) = {
                                                 let st = state.lock().await;
                                                 if let Some(pm) = &st.peer_manager {
                                                     let mut mgr = pm.lock().await;
-                                                    if let Some(entry) = mgr.get_peer(&from) {
+                                                    if let Some(entry) = mgr.get_peer_mut(&from) {
                                                         if entry.state == PeerConnectionState::Discovered {
+                                                            let ice_state = entry.ice_state.take();
                                                             let _ = mgr.update_state(&from, PeerConnectionState::Negotiating);
-                                                            true
+                                                            (true, ice_state)
                                                         } else {
                                                             eprintln!(
                                                                 "[daemon] Ignoring duplicate Signal from {:?} (state: {})",
                                                                 from, entry.state
                                                             );
-                                                            false
+                                                            (false, None)
                                                         }
                                                     } else {
-                                                        false
+                                                        (false, None)
                                                     }
                                                 } else {
-                                                    false
+                                                    (false, None)
                                                 }
                                             };
 
@@ -599,6 +614,7 @@ async fn connect_to_signaling(
                                                     handle_peer_signal(
                                                         from,
                                                         ex.candidates,
+                                                        stored_ice_state,
                                                         priv_c,
                                                         stun_server_c,
                                                         st_c,
@@ -630,72 +646,60 @@ async fn connect_to_signaling(
     let _ = event_tx.send(DaemonEvent::StatusUpdate { status: st.status.clone() });
 }
 
-/// Handles the per-peer ICE flow triggered by a `Signal` message.
+/// Handles the per-peer ICE flow triggered by a real (non-empty) `Signal` message.
 ///
 /// This function:
-/// 1. Binds a fresh ephemeral UDP socket (port 0).
-/// 2. Runs STUN on that socket to discover the public IP:port.
-/// 3. Sends the resulting candidates back to the remote peer via the signaling
-///    channel (using `peer_signal_tx`) so the remote peer knows which port to
-///    send its ICE probes to.
-/// 4. Runs ICE connectivity checks on that same socket.
-/// 5. On success, creates a `WireGuardPeer` with the confirmed remote endpoint
+/// 1. Reuses the socket and local candidates stored in `existing_ice_state` from
+///    the trigger-signal phase (no second STUN). If `None` (initiating side that
+///    never received a trigger), binds a fresh socket and runs STUN.
+/// 2. Sends local candidates to the remote peer if not already sent.
+/// 3. Runs ICE connectivity checks on that socket.
+/// 4. On success, creates a `WireGuardPeer` with the confirmed remote endpoint
 ///    and starts a per-peer `VpnEngine` that "upgrades" the ICE socket into the
 ///    WireGuard data-plane socket.
 async fn handle_peer_signal(
     from: PeerId,
     remote_candidates: Vec<Candidate>,
+    existing_ice_state: Option<(Arc<UdpSocket>, Vec<Candidate>)>,
     static_private: boringtun::x25519::StaticSecret,
     stun_server: String,
     state: Arc<Mutex<DaemonState>>,
     peer_signal_tx: mpsc::Sender<(PeerId, String)>,
     event_tx: broadcast::Sender<DaemonEvent>,
 ) {
-    // 1. Bind a fresh ephemeral socket — this will be the data-plane socket
-    //    for this peer connection once ICE succeeds.
-    let ice_socket = match UdpSocket::bind("0.0.0.0:0").await {
-        Ok(s) => Arc::new(s),
-        Err(e) => {
-            eprintln!("[daemon] Failed to bind per-peer socket for {:?}: {}", from, e);
-            return;
+    // 1. Reuse the socket and candidates from the trigger phase if available,
+    //    avoiding a second STUN request on a different ephemeral port.
+    //    If not available (initiating side), bind a fresh socket and run STUN.
+    let (ice_socket, local_candidates) = match existing_ice_state {
+        Some((sock, candidates)) => {
+            eprintln!(
+                "[daemon] Reusing trigger-phase socket (port {}) for ICE with {:?}",
+                sock.local_addr().map(|a| a.port()).unwrap_or(0),
+                from
+            );
+            (sock, candidates)
+        }
+        None => {
+            let sock = match UdpSocket::bind("0.0.0.0:0").await {
+                Ok(s) => Arc::new(s),
+                Err(e) => {
+                    eprintln!("[daemon] Failed to bind per-peer socket for {:?}: {}", from, e);
+                    return;
+                }
+            };
+            let (candidates, candidates_json) =
+                gather_candidates_for_socket(&sock, &stun_server).await;
+            eprintln!(
+                "[daemon] Sending per-peer candidates to {:?} (socket port {})",
+                from,
+                sock.local_addr().map(|a| a.port()).unwrap_or(0)
+            );
+            let _ = peer_signal_tx.send((from, candidates_json)).await;
+            (sock, candidates)
         }
     };
 
-    // 2. Gather candidates for this socket (host + STUN).
-    let (local_candidates, candidates_json) =
-        gather_candidates_for_socket(&ice_socket, &stun_server).await;
-
-    eprintln!(
-        "[daemon] Sending per-peer candidates to {:?} (socket port {})",
-        from,
-        ice_socket.local_addr().map(|a| a.port()).unwrap_or(0)
-    );
-
-    // 3. Send our per-peer candidates back to the remote peer so it knows
-    //    which ephemeral port to direct its ICE probes at.
-    let _ = peer_signal_tx.send((from, candidates_json)).await;
-
-    // 4. If remote_candidates is empty this was a trigger signal — the remote
-    //    peer just knocked to tell us to start our ICE flow. We've sent our
-    //    real candidates back; reset the peer state to Discovered so that
-    //    when the remote peer responds with its real candidates the guard in
-    //    connect_to_signaling will accept that Signal and run a proper ICE
-    //    check. There is nothing to probe yet.
-    if remote_candidates.is_empty() {
-        eprintln!(
-            "[daemon] Trigger signal from {:?}: sent our candidates, \
-             awaiting their real candidates to start ICE.",
-            from
-        );
-        let st = state.lock().await;
-        if let Some(pm) = &st.peer_manager {
-            let mut mgr = pm.lock().await;
-            let _ = mgr.update_state(&from, PeerConnectionState::Discovered);
-        }
-        return;
-    }
-
-    // 5. Run ICE on the same socket whose port we just advertised.
+    // 2. Run ICE on the socket whose port was already advertised to the remote peer.
     //    remote_candidates are real (non-zero port) at this point.
     eprintln!("[daemon] Starting ICE connectivity check with {:?}", from);
     for c in &remote_candidates {
