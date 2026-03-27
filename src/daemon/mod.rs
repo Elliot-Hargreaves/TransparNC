@@ -271,6 +271,53 @@ async fn handle_command(
     }
 }
 
+/// Runs the networking stack in the foreground without a GUI or IPC socket.
+///
+/// Intended for headless/CLI testing environments. Joins the given network
+/// via the signaling server and blocks until the user sends SIGINT (Ctrl-C).
+/// The codepath through `connect_to_signaling` is identical to what the daemon
+/// executes when it receives a `JoinNetwork` command from the GUI.
+pub async fn run_headless(network: &str, signaling_server: &str) -> anyhow::Result<()> {
+    eprintln!("[headless] Joining network '{}' via '{}'", network, signaling_server);
+
+    let net_uuid = Uuid::parse_str(network).unwrap_or_else(|_| name_to_uuid(network));
+    eprintln!("[headless] Resolved network UUID: {}", net_uuid);
+
+    let state = Arc::new(Mutex::new(DaemonState::new()));
+    let (event_tx, mut event_rx) = broadcast::channel::<DaemonEvent>(64);
+
+    // Mark as connecting before handing off to the signaling task.
+    {
+        let mut st = state.lock().await;
+        st.status = ConnectionStatus::Connecting;
+    }
+
+    // Spawn the same signaling/connection task the daemon uses when it receives
+    // a JoinNetwork command from the GUI.
+    let state_clone = state.clone();
+    let event_tx_clone = event_tx.clone();
+    let signaling_server = signaling_server.to_string();
+    tokio::spawn(async move {
+        connect_to_signaling(&signaling_server, NetworkId(net_uuid), &state_clone, &event_tx_clone).await;
+    });
+
+    // Print events to stderr so the operator can observe what's happening,
+    // and block until Ctrl-C is received.
+    loop {
+        tokio::select! {
+            Ok(event) = event_rx.recv() => {
+                eprintln!("[headless] Event: {:?}", event);
+            }
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("[headless] Shutting down.");
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Deterministically maps a human-readable network name to a UUID.
 fn name_to_uuid(name: &str) -> Uuid {
     use std::hash::{Hash, Hasher};

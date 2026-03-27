@@ -1,9 +1,11 @@
 //! Main entry point for TransparNC.
 //!
-//! Dispatches between GUI mode (default) and daemon mode (`--daemon`).
-//! The daemon runs with elevated privileges and manages TUN devices and
-//! WireGuard tunnels. The GUI runs as a normal user and communicates
-//! with the daemon over a Unix domain socket.
+//! Dispatches between GUI mode (default), daemon mode (`--daemon`), and
+//! headless mode (`--network`). The daemon runs with elevated privileges and
+//! manages TUN devices and WireGuard tunnels. The GUI runs as a normal user
+//! and communicates with the daemon over a Unix domain socket. Headless mode
+//! runs the full networking stack in the foreground without a GUI, which is
+//! useful for testing in headless environments.
 
 use clap::Parser;
 
@@ -33,7 +35,16 @@ struct Cli {
     #[arg(long)]
     daemon: bool,
 
-    /// Path to the IPC Unix domain socket.
+    /// Network name or UUID to join. When provided, the app runs in headless
+    /// mode: the full networking stack starts in the foreground with no GUI.
+    #[arg(long)]
+    network: Option<String>,
+
+    /// Signaling server WebSocket URL (used in headless mode).
+    #[arg(long, default_value = "ws://coffy.dev:8080")]
+    signaling_server: String,
+
+    /// Path to the IPC Unix domain socket (used in daemon/GUI mode).
     #[arg(long, default_value = "/tmp/transparnc.sock")]
     socket: String,
 }
@@ -41,7 +52,14 @@ struct Cli {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    if cli.daemon {
+    if let Some(network) = cli.network {
+        // Headless mode: --network was supplied, so run the networking stack
+        // in the foreground without a GUI or IPC socket.
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+            .block_on(transpar_nc::daemon::run_headless(&network, &cli.signaling_server))
+    } else if cli.daemon {
         // Daemon mode needs a tokio runtime for async networking.
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
