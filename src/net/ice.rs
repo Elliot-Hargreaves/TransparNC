@@ -319,6 +319,7 @@ pub async fn check_connectivity_with_config(
     let mut buf = [0u8; 64];
 
     for round in 0..config.max_attempts {
+        eprintln!("[ice] Starting probe round {}/{}", round + 1, config.max_attempts);
         let deadline = tokio::time::Instant::now() + config.timeout;
 
         // Collect remote addresses so we can index into them without borrowing `pairs`.
@@ -342,16 +343,20 @@ pub async fn check_connectivity_with_config(
                         if let Ok((n, src)) = result {
                             let data = &buf[..n];
                             if is_probe(data) && !is_ack(data) {
+                                eprintln!("[ice] Received probe from {}", src);
                                 let _ = socket.send_to(&ack_pkt, src).await;
                             }
-                            if is_ack(data)
-                                && let Some(pair) = pairs.iter().find(|p| p.remote.addr == src)
-                            {
-                                eprintln!(
-                                    "[ice] Connectivity check succeeded: {} <-> {}",
-                                    pair.local.addr, pair.remote.addr
-                                );
-                                return Ok(pair.clone());
+                            if is_ack(data) {
+                                eprintln!("[ice] Received ACK from {}", src);
+                                if let Some(pair) = pairs.iter().find(|p| p.remote.addr == src) {
+                                    eprintln!(
+                                        "[ice] Connectivity check succeeded: {} <-> {}",
+                                        pair.local.addr, pair.remote.addr
+                                    );
+                                    return Ok(pair.clone());
+                                } else {
+                                    eprintln!("[ice] ACK from {} does not match any known candidate pair", src);
+                                }
                             }
                         }
                     }
@@ -370,16 +375,20 @@ pub async fn check_connectivity_with_config(
                     Ok(Ok((n, src))) => {
                         let data = &buf[..n];
                         if is_probe(data) && !is_ack(data) {
+                            eprintln!("[ice] Received probe from {}", src);
                             let _ = socket.send_to(&ack_pkt, src).await;
                         }
-                        if is_ack(data)
-                            && let Some(pair) = pairs.iter().find(|p| p.remote.addr == src)
-                        {
-                            eprintln!(
-                                "[ice] Connectivity check succeeded: {} <-> {}",
-                                pair.local.addr, pair.remote.addr
-                            );
-                            return Ok(pair.clone());
+                        if is_ack(data) {
+                            eprintln!("[ice] Received ACK from {}", src);
+                            if let Some(pair) = pairs.iter().find(|p| p.remote.addr == src) {
+                                eprintln!(
+                                    "[ice] Connectivity check succeeded: {} <-> {}",
+                                    pair.local.addr, pair.remote.addr
+                                );
+                                return Ok(pair.clone());
+                            } else {
+                                eprintln!("[ice] ACK from {} does not match any known candidate pair", src);
+                            }
                         }
                     }
                     Ok(Err(e)) => {
@@ -387,6 +396,7 @@ pub async fn check_connectivity_with_config(
                     }
                     Err(_) => {
                         // Round deadline elapsed — move to next round.
+                        eprintln!("[ice] Probe round {} timed out", round + 1);
                         break;
                     }
                 }
