@@ -38,8 +38,7 @@ pub struct WireGuardPeer {
     /// The remote endpoint of the peer.
     endpoint: Option<SocketAddr>,
     /// The public key of the peer.
-    #[allow(dead_code)]
-    public_key: PublicKey,
+    pub public_key: PublicKey,
 }
 
 impl WireGuardPeer {
@@ -93,6 +92,11 @@ impl WireGuardPeer {
     /// Returns the remote endpoint of the peer.
     pub fn endpoint(&self) -> Option<SocketAddr> {
         self.endpoint
+    }
+
+    /// Returns the public key of the peer.
+    pub fn public_key(&self) -> PublicKey {
+        self.public_key
     }
 
     /// Updates the remote endpoint of the peer.

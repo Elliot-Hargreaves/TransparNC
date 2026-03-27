@@ -347,8 +347,8 @@ pub async fn check_connectivity_with_config(
                             if is_ack(data)
                                 && let Some(pair) = pairs.iter().find(|p| p.remote.addr == src)
                             {
-                                println!(
-                                    "ICE: connectivity check succeeded: {} <-> {}",
+                                eprintln!(
+                                    "[ice] Connectivity check succeeded: {} <-> {}",
                                     pair.local.addr, pair.remote.addr
                                 );
                                 return Ok(pair.clone());
@@ -357,7 +357,9 @@ pub async fn check_connectivity_with_config(
                     }
                     result = socket.send_to(&probe_pkt, remote_addrs[send_idx]) => {
                         if let Err(e) = result {
-                            eprintln!("ICE: probe send to {} failed: {e}", remote_addrs[send_idx]);
+                            eprintln!("[ice] Probe send to {} failed: {e}", remote_addrs[send_idx]);
+                        } else {
+                             eprintln!("[ice] Sent probe to {}", remote_addrs[send_idx]);
                         }
                         send_idx += 1;
                     }
@@ -373,15 +375,15 @@ pub async fn check_connectivity_with_config(
                         if is_ack(data)
                             && let Some(pair) = pairs.iter().find(|p| p.remote.addr == src)
                         {
-                            println!(
-                                "ICE: connectivity check succeeded: {} <-> {}",
+                            eprintln!(
+                                "[ice] Connectivity check succeeded: {} <-> {}",
                                 pair.local.addr, pair.remote.addr
                             );
                             return Ok(pair.clone());
                         }
                     }
                     Ok(Err(e)) => {
-                        eprintln!("ICE: recv error during check: {e}");
+                        eprintln!("[ice] Recv error during check: {e}");
                     }
                     Err(_) => {
                         // Round deadline elapsed — move to next round.

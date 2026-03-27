@@ -282,6 +282,13 @@ impl PeerStore for PeerManager {
             entry.last_heartbeat = Some(Instant::now());
         }
 
+        eprintln!(
+            "[peer] State transition for {:?}: {} -> {}",
+            peer_id,
+            entry.state.name(),
+            new_state.name()
+        );
+
         entry.state = new_state;
         Ok(())
     }

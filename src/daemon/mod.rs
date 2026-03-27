@@ -575,6 +575,7 @@ async fn connect_to_signaling(
                             let static_private_clone = static_private.clone();
 
                             tokio::spawn(async move {
+                                eprintln!("[daemon] Starting ICE connectivity check with {:?}", from_peer_id);
                                 let (conn_state, result) = crate::net::ice::establish_connectivity(
                                     &udp_clone,
                                     None, // STUN handled by VpnEngine/manually if needed

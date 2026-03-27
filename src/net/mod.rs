@@ -6,7 +6,7 @@ pub mod tun;
 pub mod wireguard;
 
 use crate::net::nat::StunClient;
-use crate::net::peer::PeerManager;
+use crate::net::peer::{PeerManager, PeerStore};
 use crate::net::tun::TunDevice;
 use crate::net::wireguard::WireGuardPeer;
 use boringtun::noise::TunnResult;
@@ -96,22 +96,7 @@ impl VpnEngine {
     }
 
     /// Runs the main packet processing loop.
-    ///
-    /// Spawns three concurrent tasks:
-    /// 1. TUN → UDP: reads IP packets from the TUN device, encrypts via
-    ///    WireGuard, and sends over UDP.
-    /// 2. UDP → TUN: receives encrypted packets from UDP, decrypts, and
-    ///    writes to the TUN device.
-    /// 3. Heartbeat checker: periodically inspects peer timestamps and
-    ///    transitions stale/disconnected peers.
     pub async fn run(self) -> anyhow::Result<()> {
-        if let Some(stun) = &self.stun_client {
-            match stun.discover_external_addr(&self.udp).await {
-                Ok(addr) => println!("Discovered external address: {}", addr),
-                Err(e) => eprintln!("NAT discovery failed: {}", e),
-            }
-        }
-
         let (mut tun_reader, mut tun_writer) = tokio::io::split(self.tun.device);
         let wg_peers = self.wg_peers.clone();
         let udp = self.udp.clone();
@@ -121,6 +106,7 @@ impl VpnEngine {
         let tun_to_udp = {
             let wg_peers = wg_peers.clone();
             let udp = udp.clone();
+            let peer_manager = peer_manager.clone();
             tokio::spawn(async move {
                 let mut buf = [0u8; 2048];
                 let mut out = [0u8; 2048];
@@ -128,26 +114,60 @@ impl VpnEngine {
                     match tun_reader.read(&mut buf).await {
                         Ok(0) => break,
                         Ok(n) => {
-                            let dest_ip = if n >= 20 {
-                                format!("{}.{}.{}.{}", buf[16], buf[17], buf[18], buf[19])
-                            } else {
-                                "unknown".to_string()
-                            };
-                            eprintln!("[vpn] Captured {} bytes from TUN. Dest IP: {}", n, dest_ip);
+                            if n < 20 {
+                                continue;
+                            }
+                            let dest_ip_bytes = [buf[16], buf[17], buf[18], buf[19]];
+                            let dest_ip = format!("{}.{}.{}.{}", dest_ip_bytes[0], dest_ip_bytes[1], dest_ip_bytes[2], dest_ip_bytes[3]);
+                            
+                            // 192.168.22.N -> N
+                            let target_index = dest_ip_bytes[3];
+                            
                             let mut peers = wg_peers.lock().await;
-                            // For simplicity, we send to the first peer with an endpoint.
-                            // In a real P2P VPN, we'd look up the peer by destination IP.
-                            if let Some(peer) = peers.iter_mut().find(|p| p.endpoint().is_some()) {
-                                if let TunnResult::WriteToNetwork(packet) =
-                                    peer.encapsulate(&buf[..n], &mut out)
-                                {
-                                    if let Some(endpoint) = peer.endpoint() {
-                                        let _ = udp.send_to(packet, endpoint).await;
+                            let mgr = peer_manager.lock().await;
+                            
+                            // Find the peer info by virtual_index
+                            let target_peer_id = mgr.all_peers().iter()
+                                .find(|p| p.info.virtual_index == target_index)
+                                .map(|p| p.peer_id);
+
+                            if let Some(peer_id) = target_peer_id {
+                                // Find the WG peer by matching public key (mapped via peer_id -> info -> public_key)
+                                let peer_info = mgr.get_peer(&peer_id).map(|e| e.info.clone());
+                                if let Some(info) = peer_info {
+                                    if let Some(peer) = peers.iter_mut().find(|p| {
+                                        hex::encode(p.public_key().as_bytes()) == info.public_key
+                                    }) {
+                                        match peer.encapsulate(&buf[..n], &mut out) {
+                                            TunnResult::WriteToNetwork(packet) => {
+                                                if let Some(endpoint) = peer.endpoint() {
+                                                    match udp.send_to(packet, endpoint).await {
+                                                        Ok(_) => {
+                                                            eprintln!("[vpn] Sent {} encrypted bytes to {} ({})", packet.len(), dest_ip, endpoint);
+                                                        }
+                                                        Err(e) => {
+                                                            eprintln!("[vpn] Failed to send UDP to {}: {}", endpoint, e);
+                                                        }
+                                                    }
+                                                } else {
+                                                    eprintln!("[vpn] No endpoint for peer {}", dest_ip);
+                                                }
+                                            }
+                                            TunnResult::Err(e) => {
+                                                eprintln!("[vpn] WG encapsulation error for {}: {:?}", dest_ip, e);
+                                            }
+                                            _ => {}
+                                        }
+                                    } else {
+                                        // eprintln!("[vpn] No WG peer found for IP {}", dest_ip);
                                     }
                                 }
                             }
                         }
-                        Err(_) => break,
+                        Err(e) => {
+                            eprintln!("[vpn] TUN read error: {}", e);
+                            break;
+                        }
                     }
                 }
             })
@@ -162,17 +182,47 @@ impl VpnEngine {
                 let mut out = [0u8; 2048];
                 while let Ok((n, addr)) = udp.recv_from(&mut buf).await {
                     let mut peers = wg_peers.lock().await;
-                    // Find peer by endpoint or try all (simpler for now)
+                    // Find peer by endpoint
                     if let Some(peer) = peers.iter_mut().find(|p| p.endpoint() == Some(addr)) {
                         match peer.decapsulate(&buf[..n], &mut out) {
                             TunnResult::WriteToTunnelV4(packet, _)
                             | TunnResult::WriteToTunnelV6(packet, _) => {
-                                let _ = tun_writer.write_all(packet).await;
+                                if let Err(e) = tun_writer.write_all(packet).await {
+                                    eprintln!("[vpn] TUN write error: {}", e);
+                                } else {
+                                    eprintln!("[vpn] Wrote {} bytes to TUN from {}", packet.len(), addr);
+                                }
                             }
                             TunnResult::WriteToNetwork(packet) => {
                                 let _ = udp.send_to(packet, addr).await;
                             }
+                            TunnResult::Err(e) => {
+                                eprintln!("[vpn] WG decapsulation error from {}: {:?}", addr, e);
+                            }
                             _ => {}
+                        }
+                    } else {
+                        // If endpoint not found, try all peers (one might be the correct one if endpoint changed)
+                        // but only if we have few peers to avoid perf issues.
+                        for peer in peers.iter_mut() {
+                             match peer.decapsulate(&buf[..n], &mut out) {
+                                TunnResult::WriteToTunnelV4(packet, _)
+                                | TunnResult::WriteToTunnelV6(packet, _) => {
+                                    if let Err(e) = tun_writer.write_all(packet).await {
+                                        eprintln!("[vpn] TUN write error: {}", e);
+                                    } else {
+                                        eprintln!("[vpn] Wrote {} bytes to TUN from {} (new endpoint)", packet.len(), addr);
+                                    }
+                                    // Update endpoint if it matched
+                                    peer.set_endpoint(addr);
+                                    break;
+                                }
+                                TunnResult::WriteToNetwork(packet) => {
+                                    let _ = udp.send_to(packet, addr).await;
+                                    break;
+                                }
+                                _ => {}
+                             }
                         }
                     }
                 }
