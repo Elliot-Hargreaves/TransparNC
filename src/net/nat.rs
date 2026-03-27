@@ -44,6 +44,30 @@ impl StunClient for RealStunClient {
     async fn discover_external_addr(&self, socket: &UdpSocket) -> Result<SocketAddr, NatError> {
         println!("STUN: Connecting to {}", self.stun_server);
 
+        // Determine the socket's address family so we only contact a STUN
+        // server address of the same family. Passing a hostname string directly
+        // to send_to can resolve to an IPv6 address on dual-stack hosts, which
+        // fails with EAFNOSUPPORT on an IPv4-only socket.
+        let local_addr = socket
+            .local_addr()
+            .map_err(|e| NatError::NetworkError(e.to_string()))?;
+        let want_ipv4 = local_addr.is_ipv4();
+
+        // Resolve once and pick an address matching the socket's family.
+        let stun_addr = tokio::net::lookup_host(&self.stun_server)
+            .await
+            .map_err(|e| NatError::NetworkError(e.to_string()))?
+            .find(|addr| addr.is_ipv4() == want_ipv4)
+            .ok_or_else(|| {
+                NatError::NetworkError(format!(
+                    "No {} address found for {}",
+                    if want_ipv4 { "IPv4" } else { "IPv6" },
+                    self.stun_server
+                ))
+            })?;
+
+        println!("STUN: Resolved {} -> {}", self.stun_server, stun_addr);
+
         let mut msg = Message::new();
         msg.set_type(BINDING_REQUEST);
         msg.new_transaction_id().map_err(|_| NatError::ParseError)?;
@@ -53,9 +77,9 @@ impl StunClient for RealStunClient {
         for attempt in 1..=3 {
             println!(
                 "STUN: Sending request to {} (attempt {})...",
-                self.stun_server, attempt
+                stun_addr, attempt
             );
-            if let Err(e) = socket.send_to(msg.raw.as_slice(), &self.stun_server).await {
+            if let Err(e) = socket.send_to(msg.raw.as_slice(), stun_addr).await {
                 println!("STUN: Send error: {}", e);
                 if attempt == 3 {
                     return Err(NatError::NetworkError(e.to_string()));
