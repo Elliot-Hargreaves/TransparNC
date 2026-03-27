@@ -10,6 +10,7 @@ use crate::common::ipc::{
 use crate::common::messages::{
     CandidateExchange, NetworkId, PeerId, SignalingMessage,
 };
+use crate::net::ice::{CandidateType, IceError};
 use crate::net::nat::RealStunClient;
 use crate::net::peer::{PeerConnectionState, PeerManager, PeerStore};
 use crate::net::tun::{TunConfig, TunDevice};
@@ -18,7 +19,7 @@ use futures_util::{SinkExt, StreamExt};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio_tungstenite::tungstenite;
 use uuid::Uuid;
 
@@ -189,7 +190,6 @@ async fn handle_command(
             let _ = event_tx.send(DaemonEvent::StatusUpdate {
                 status: st.status.clone(),
             });
-            // TODO: actually create TUN and start WireGuard here.
             // For now, simulate a successful connection.
             st.status = ConnectionStatus::Connected {
                 virtual_ip: "192.168.22.1".to_string(),
@@ -209,7 +209,6 @@ async fn handle_command(
         }
         DaemonCommand::Shutdown => {
             eprintln!("[daemon] Shutdown requested — tearing down TUN devices.");
-            // TODO: actually tear down TUN devices here.
             let _ = write_message(writer, &DaemonEvent::ShuttingDown).await;
             let _ = event_tx.send(DaemonEvent::ShuttingDown);
             // Signal the accept loop to exit.
@@ -230,8 +229,6 @@ async fn handle_command(
             });
             drop(st);
 
-            // Parse the network_id as a UUID; if it fails, derive one
-            // deterministically from the name so arbitrary strings still work.
             let net_uuid =
                 Uuid::parse_str(&network_id).unwrap_or_else(|_| name_to_uuid(&network_id));
 
@@ -257,8 +254,6 @@ async fn handle_command(
             });
             drop(st);
 
-            // Generate a deterministic network UUID from the chosen name so
-            // that other peers can join using the same name string.
             let net_uuid = name_to_uuid(&network_name);
             eprintln!(
                 "[daemon] Network '{}' mapped to UUID {}",
@@ -275,28 +270,18 @@ async fn handle_command(
     }
 }
 
-/// Derives a deterministic UUID from an arbitrary network name string.
-///
-/// Uses a simple hash-based approach to produce a reproducible UUID so that
-/// two peers using the same human-readable name will arrive at the same
-/// network identifier.
 fn name_to_uuid(name: &str) -> Uuid {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    // Include a fixed namespace prefix to avoid collisions with random UUIDs.
     "transparnc-network:".hash(&mut hasher);
     name.hash(&mut hasher);
     let hash = hasher.finish();
-    // Build a UUID from the 64-bit hash, zero-filling the upper half.
     let mut bytes = [0u8; 16];
     bytes[..8].copy_from_slice(&hash.to_be_bytes());
     bytes[8..16].copy_from_slice(&hash.to_le_bytes());
     Uuid::from_bytes(bytes)
 }
 
-/// Connects to the signaling server over WebSocket, sends a `Join` message,
-/// and listens for responses. Updates daemon state and broadcasts events to
-/// GUI clients as peers are discovered.
 async fn connect_to_signaling(
     signaling_server: &str,
     network_id: NetworkId,
@@ -307,7 +292,7 @@ async fn connect_to_signaling(
     eprintln!("[daemon] Connecting to signaling server at {}", url);
 
     let ws_stream = match tokio_tungstenite::connect_async(&url).await {
-        Ok((stream, _response)) => {
+        Ok((stream, _)) => {
             eprintln!("[daemon] WebSocket connection established to {}", url);
             stream
         }
@@ -315,384 +300,209 @@ async fn connect_to_signaling(
             eprintln!("[daemon] Failed to connect to signaling server: {}", e);
             let mut st = state.lock().await;
             st.status = ConnectionStatus::Disconnected;
-            let _ = event_tx.send(DaemonEvent::StatusUpdate {
-                status: st.status.clone(),
-            });
-            let _ = event_tx.send(DaemonEvent::Error {
-                message: format!("Failed to connect to signaling server: {}", e),
-            });
+            let _ = event_tx.send(DaemonEvent::StatusUpdate { status: st.status.clone() });
+            let _ = event_tx.send(DaemonEvent::Error { message: format!("Failed to connect: {}", e) });
             return;
         }
     };
 
     let (mut ws_writer, mut ws_reader) = ws_stream.split();
-
-    // Generate real X25519 keys for this session.
     let keypair = KeyPair::generate();
     let static_private = keypair.private.clone();
     let public_key = hex::encode(keypair.public.as_bytes());
-
-    // Local port for UDP/ICE (hardcoded for now, should be dynamic)
     let local_port = 51820;
     let udp = match tokio::net::UdpSocket::bind(format!("0.0.0.0:{}", local_port)).await {
         Ok(u) => Arc::new(u),
         Err(e) => {
-            eprintln!("[daemon] Failed to bind UDP socket on {}: {}", local_port, e);
+            eprintln!("[daemon] Failed to bind UDP socket: {}", e);
             return;
         }
     };
 
-    // Trace candidates (host + STUN)
     let stun_server = "stun.l.google.com:19302".to_string();
-    let stun_client = RealStunClient::new(stun_server);
-    let local_candidates = match crate::net::ice::gather_candidates(Some(&stun_client), &udp).await {
+    let stun_client = RealStunClient::new(stun_server.clone());
+    let mut local_candidates = match crate::net::ice::gather_candidates(Some(&stun_client), &udp).await {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[daemon] Failed to gather candidates: {}", e);
-            // Fallback to host candidates only if full gathering fails completely
+            eprintln!("[daemon] Initial gathering failed: {}", e);
             crate::net::ice::gather_host_candidates(local_port)
         }
     };
 
-    for candidate in &local_candidates {
-        eprintln!(
-            "[daemon] Gathered local ICE candidate: {:?} ({})",
-            candidate.candidate_type, candidate.addr
-        );
+    let mut exchange = CandidateExchange { candidates: local_candidates.clone() };
+    let mut exchange_json = serde_json::to_string(&exchange).unwrap();
+    let has_stun = local_candidates.iter().any(|c| matches!(c.candidate_type, CandidateType::ServerReflexive));
+    let (exchange_update_tx, mut exchange_update_rx) = mpsc::channel::<String>(1);
+
+    if !has_stun {
+        eprintln!("[daemon] STUN not yet gathered. Starting background refresh.");
+        let udp_clone = udp.clone();
+        let stun_server_clone = stun_server.clone();
+        tokio::spawn(async move {
+            let stun_client = RealStunClient::new(stun_server_clone);
+            match tokio::time::timeout(std::time::Duration::from_secs(5), crate::net::ice::gather_candidates(Some(&stun_client), &udp_clone)).await {
+                Ok(Ok(new_candidates)) => {
+                    if new_candidates.iter().any(|c| matches!(c.candidate_type, CandidateType::ServerReflexive)) {
+                        let new_json = serde_json::to_string(&CandidateExchange { candidates: new_candidates }).unwrap();
+                        let _ = exchange_update_tx.send(new_json).await;
+                    }
+                }
+                _ => eprintln!("[daemon] Background STUN failed or timed out."),
+            }
+        });
     }
 
-    // Prepare signaling message to exchange candidates
-    let exchange = CandidateExchange {
-        candidates: local_candidates.clone(),
-    };
-    let exchange_json = serde_json::to_string(&exchange).unwrap();
+    for c in &local_candidates {
+        eprintln!("[daemon] Gathered local candidate: {:?} ({})", c.candidate_type, c.addr);
+    }
 
-    // Generate a unique peer ID.
     let peer_id = PeerId(Uuid::new_v4());
+    let join_msg = SignalingMessage::Join { network_id, peer_id, public_key };
+    let join_json = serde_json::to_string(&join_msg).unwrap();
+    eprintln!("[daemon] Sending Join: {}", join_json);
 
-    let join_msg = SignalingMessage::Join {
-        network_id,
-        peer_id,
-        public_key,
-    };
-    let join_json = serde_json::to_string(&join_msg).expect("failed to serialize Join message");
-    eprintln!("[daemon] Sending Join message: {}", join_json);
-
-    if let Err(e) = ws_writer
-        .send(tungstenite::Message::Text(join_json.into()))
-        .await
-    {
-        eprintln!("[daemon] Failed to send Join message: {}", e);
+    if let Err(e) = ws_writer.send(tungstenite::Message::Text(join_json.into())).await {
+        eprintln!("[daemon] Failed to send Join: {}", e);
         let mut st = state.lock().await;
         st.status = ConnectionStatus::Disconnected;
-        let _ = event_tx.send(DaemonEvent::StatusUpdate {
-            status: st.status.clone(),
-        });
+        let _ = event_tx.send(DaemonEvent::StatusUpdate { status: st.status.clone() });
         return;
     }
 
-    // Listen for signaling messages from the server.
-    while let Some(msg_result) = ws_reader.next().await {
-        match msg_result {
-            Ok(tungstenite::Message::Text(text)) => {
-                eprintln!("[daemon] Received from signaling server: {}", text);
-                match serde_json::from_str::<SignalingMessage>(&text) {
-                    Ok(SignalingMessage::Joined {
-                        peers,
-                        assigned_index,
-                    }) => {
-                        eprintln!(
-                            "[daemon] Joined network successfully, {} existing peer(s). Assigned index: {}",
-                            peers.len(),
-                            assigned_index
-                        );
-
-                        // Use the hardcoded 192.168.22.N IP.
-                        let ip_str = format!("192.168.22.{}", assigned_index);
-                        let ip = ip_str.parse::<std::net::Ipv4Addr>().unwrap();
-
-                        let config = TunConfig {
-                            name: "transparnc0".to_string(),
-                            address: ip,
-                            netmask: "255.255.255.0".parse().unwrap(),
-                            mtu: 1420,
-                        };
-
-                        let (assigned_ip, tun_device) = match TunDevice::new(config) {
-                            Ok(tun) => {
-                                eprintln!(
-                                    "[daemon] Successfully created TUN device with IP {}",
-                                    ip_str
-                                );
-                                (Some(ip_str), Some(tun))
-                            }
-                            Err(e) => {
-                                eprintln!(
-                                    "[daemon] Failed to create TUN device with IP {}: {}",
-                                    ip_str, e
-                                );
-                                (None, None)
-                            }
-                        };
-
-                        if let (Some(ip), Some(tun)) = (assigned_ip, tun_device) {
-                            let ipc_peers: Vec<IpcPeerInfo> = peers
-                                .iter()
-                                .map(|p| IpcPeerInfo {
-                                    name: p.peer_id.0.to_string(),
-                                    virtual_ip: format!("192.168.22.{}", p.virtual_index),
-                                    connected: false,
-                                })
-                                .collect();
-
-                            // Instantiate VpnEngine.
-                            let stun_server = "stun.l.google.com:19302".to_string();
-                            let stun_client = RealStunClient::new(stun_server);
-                            let engine = match crate::net::VpnEngine::with_socket(
-                                tun,
-                                udp.clone(),
-                                Some(Box::new(stun_client)),
-                            ) {
-                                Ok(e) => e,
-                                Err(e) => {
-                                    eprintln!("[daemon] Failed to create VpnEngine: {}", e);
-                                    return;
-                                }
-                            };
-
-                            let mut st = state.lock().await;
-                            st.status = ConnectionStatus::Connected { virtual_ip: ip };
-                            st.peers = ipc_peers.clone();
-                            st.tun = None; // VpnEngine took ownership of the TUN device.
-                            st.engine_peer_manager = Some(engine.peer_manager());
-                            st.engine_wg_peers = Some(engine.wg_peers());
-                            let _ = event_tx.send(DaemonEvent::StatusUpdate {
-                                status: st.status.clone(),
-                            });
-                            let _ = event_tx.send(DaemonEvent::PeerUpdate { peers: ipc_peers });
-
-                            // Add initial peers to VpnEngine and start signaling them.
-                            for p in &peers {
-                                let peer_id_remote = p.peer_id;
-                                let peer_info = p.clone();
-                                let peer_manager = engine.peer_manager();
-                                let mut mgr = peer_manager.lock().await;
-                                let _ = mgr.add_peer(peer_info.clone());
-
-                                // Send our ICE candidates to the newly discovered peer.
-                                let signal = SignalingMessage::Signal {
-                                    to: peer_id_remote,
-                                    from: peer_id,
-                                    data: exchange_json.clone(),
-                                };
-                                if let Ok(json) = serde_json::to_string(&signal) {
-                                    let _ = ws_writer
-                                        .send(tungstenite::Message::Text(json.into()))
-                                        .await;
-                                }
-                            }
-
-                            // Run VPN Engine in the background (move ownership).
-                            tokio::spawn(async move {
-                                if let Err(e) = engine.run().await {
-                                    eprintln!("[daemon] VpnEngine exited with error: {}", e);
-                                }
-                            });
-                        } else {
-                            eprintln!(
-                                "[daemon] Could not find an available subnet for IP index {}",
-                                assigned_index
-                            );
-                            let mut st = state.lock().await;
-                            st.status = ConnectionStatus::Disconnected;
-                            let _ = event_tx.send(DaemonEvent::StatusUpdate {
-                                status: st.status.clone(),
-                            });
-                            let _ = event_tx.send(DaemonEvent::Error {
-                                message: "Failed to allocate a local virtual IP".to_string(),
-                            });
-                            return;
+    loop {
+        tokio::select! {
+            Some(new_json) = exchange_update_rx.recv() => {
+                eprintln!("[daemon] STUN gathered. Updating exchange and re-signaling.");
+                exchange_json = new_json.clone();
+                if let Ok(new_ex) = serde_json::from_str::<CandidateExchange>(&new_json) {
+                    exchange.candidates = new_ex.candidates;
+                }
+                let peers_to_signal = {
+                    let st = state.lock().await;
+                    if matches!(st.status, ConnectionStatus::Connected { .. }) {
+                        st.peers.clone()
+                    } else {
+                        vec![]
+                    }
+                };
+                for p_info in peers_to_signal {
+                    if let Ok(p_id) = p_info.name.parse::<Uuid>() {
+                        let signal = SignalingMessage::Signal { to: PeerId(p_id), from: peer_id, data: exchange_json.clone() };
+                        if let Ok(json) = serde_json::to_string(&signal) {
+                            let _ = ws_writer.send(tungstenite::Message::Text(json.into())).await;
                         }
-                    }
-                    Ok(SignalingMessage::PeerJoined { peer }) => {
-                        eprintln!(
-                            "[daemon] New peer joined: {:?} with index {}",
-                            peer.peer_id, peer.virtual_index
-                        );
-
-                        // If we are connected, send our candidates to the newcomer.
-                        let is_connected = {
-                            let st = state.lock().await;
-                            matches!(st.status, ConnectionStatus::Connected { .. })
-                        };
-
-                        if is_connected {
-                            // Also add the peer to our peer manager if it's not already there.
-                            let peer_manager = {
-                                let st = state.lock().await;
-                                st.engine_peer_manager.clone()
-                            };
-
-                            if let Some(peer_manager) = peer_manager {
-                                let mut mgr = peer_manager.lock().await;
-                                if mgr.get_peer(&peer.peer_id).is_none() {
-                                    let _ = mgr.add_peer(peer.clone());
-                                }
-                            }
-
-                            let signal = SignalingMessage::Signal {
-                                to: peer.peer_id,
-                                from: peer_id,
-                                data: exchange_json.clone(),
-                            };
-                            if let Ok(json) = serde_json::to_string(&signal) {
-                                let _ = ws_writer
-                                    .send(tungstenite::Message::Text(json.into()))
-                                    .await;
-                            }
-                        }
-
-                        let mut st = state.lock().await;
-                        st.peers.push(IpcPeerInfo {
-                            name: peer.peer_id.0.to_string(),
-                            virtual_ip: format!("192.168.22.{}", peer.virtual_index),
-                            connected: false,
-                        });
-                        let _ = event_tx.send(DaemonEvent::PeerUpdate {
-                            peers: st.peers.clone(),
-                        });
-                    }
-                    Ok(SignalingMessage::PeerLeft { peer_id }) => {
-                        eprintln!("[daemon] Peer left: {:?}", peer_id);
-                        let mut st = state.lock().await;
-                        st.peers.retain(|p| p.name != peer_id.0.to_string());
-                        let _ = event_tx.send(DaemonEvent::PeerUpdate {
-                            peers: st.peers.clone(),
-                        });
-                    }
-                    Ok(SignalingMessage::Signal { from, data, .. }) => {
-                        eprintln!(
-                            "[daemon] Received signal from peer {:?}: length={}",
-                            from,
-                            data.len()
-                        );
-                        if let Ok(exchange) = serde_json::from_str::<CandidateExchange>(&data) {
-                            eprintln!(
-                                "[daemon] Received {} remote ICE candidates from {:?}",
-                                exchange.candidates.len(),
-                                from
-                            );
-
-                            // Start hole punching and WireGuard session in the background.
-                            let udp_clone = udp.clone();
-                            let from_peer_id = from;
-                            let remote_candidates = exchange.candidates;
-                            let state_clone = state.clone();
-                            let static_private_clone = static_private.clone();
-
-                            tokio::spawn(async move {
-                                eprintln!("[daemon] Starting ICE connectivity check with {:?}", from_peer_id);
-                                for c in &remote_candidates {
-                                    eprintln!("[daemon]   Remote candidate: {:?} @ {}", c.candidate_type, c.addr);
-                                }
-                                let stun_server = "stun.l.google.com:19302".to_string();
-                                let stun_client = RealStunClient::new(stun_server);
-                                let (conn_state, result) = crate::net::ice::establish_connectivity(
-                                    &udp_clone,
-                                    Some(&stun_client),
-                                    remote_candidates,
-                                )
-                                .await;
-
-                                if let Ok(selected_pair) = result {
-                                    eprintln!(
-                                        "[daemon] ICE connection established with {:?} via {:?}",
-                                        from_peer_id, selected_pair.remote.addr
-                                    );
-
-                                    // Create WireGuard peer and add to VpnEngine.
-                                    let (peer_manager, wg_peers) = {
-                                        let st = state_clone.lock().await;
-                                        (st.engine_peer_manager.clone(), st.engine_wg_peers.clone())
-                                    };
-
-                                    if let (Some(peer_manager), Some(wg_peers)) = (peer_manager, wg_peers) {
-                                        let peer_info = {
-                                            let mgr = peer_manager.lock().await;
-                                            mgr.get_peer(&from_peer_id).map(|e| e.info.clone())
-                                        };
-
-                                        if let Some(info) = peer_info {
-                                            if let Ok(peer_pub_bytes) = hex::decode(&info.public_key) {
-                                                if peer_pub_bytes.len() == 32 {
-                                                    let mut bytes = [0u8; 32];
-                                                    bytes.copy_from_slice(&peer_pub_bytes);
-                                                    let peer_static_public =
-                                                        boringtun::x25519::PublicKey::from(bytes);
-
-                                                    let wg_peer = WireGuardPeer::new(
-                                                        static_private_clone,
-                                                        peer_static_public,
-                                                        None,
-                                                        Some(25),
-                                                        0, // index
-                                                        Some(selected_pair.remote.addr),
-                                                    );
-
-                                                    if let Ok(peer) = wg_peer {
-                                                        let mut peers = wg_peers.lock().await;
-                                                        peers.push(peer);
-                                                        let mut mgr = peer_manager.lock().await;
-                                                        let _ = mgr.update_state(
-                                                            &from_peer_id,
-                                                            PeerConnectionState::Connected,
-                                                        );
-                                                        eprintln!(
-                                                            "[daemon] WireGuard peer added for {:?}",
-                                                            from_peer_id
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    eprintln!(
-                                        "[daemon] ICE connection failed for peer {:?}: {:?}",
-                                        from_peer_id, conn_state
-                                    );
-                                }
-                            });
-                        } else {
-                            eprintln!("[daemon] Failed to parse Signal data as CandidateExchange");
-                        }
-                    }
-                    Ok(other) => {
-                        eprintln!("[daemon] Unhandled signaling message: {:?}", other);
-                    }
-                    Err(e) => {
-                        eprintln!("[daemon] Failed to parse signaling message: {}", e);
                     }
                 }
             }
-            Ok(tungstenite::Message::Close(_)) => {
-                eprintln!("[daemon] Signaling server closed the connection");
-                break;
+            msg_result = ws_reader.next() => {
+                let msg = match msg_result {
+                    Some(Ok(m)) => m,
+                    _ => break,
+                };
+                match msg {
+                    tungstenite::Message::Text(text) => {
+                        eprintln!("[daemon] Received signal: {}", text);
+                        if let Ok(sig_msg) = serde_json::from_str::<SignalingMessage>(&text) {
+                            match sig_msg {
+                                SignalingMessage::Joined { peers, assigned_index } => {
+                                    eprintln!("[daemon] Joined network. Index: {}", assigned_index);
+                                    let ip_str = format!("192.168.22.{}", assigned_index);
+                                    let ip = ip_str.parse::<std::net::Ipv4Addr>().unwrap();
+                                    let config = TunConfig { name: "transparnc0".to_string(), address: ip, netmask: "255.255.255.0".parse().unwrap(), mtu: 1420 };
+                                    if let Ok(tun) = TunDevice::new(config) {
+                                        let ipc_peers: Vec<IpcPeerInfo> = peers.iter().map(|p| IpcPeerInfo { name: p.peer_id.0.to_string(), virtual_ip: format!("192.168.22.{}", p.virtual_index), connected: false }).collect();
+                                        let stun_for_engine = stun_server.clone();
+                                                                                let engine = match crate::net::VpnEngine::with_socket(tun, udp.clone(), Some(Box::new(RealStunClient::new(stun_for_engine)))) {
+                                            Ok(e) => e,
+                                            Err(e) => { eprintln!("[daemon] Failed engine: {}", e); return; }
+                                        };
+                                        {
+                                            let mut st = state.lock().await;
+                                            st.status = ConnectionStatus::Connected { virtual_ip: ip_str };
+                                            st.peers = ipc_peers.clone();
+                                            st.engine_peer_manager = Some(engine.peer_manager());
+                                            st.engine_wg_peers = Some(engine.wg_peers());
+                                            let _ = event_tx.send(DaemonEvent::StatusUpdate { status: st.status.clone() });
+                                            let _ = event_tx.send(DaemonEvent::PeerUpdate { peers: ipc_peers });
+                                        }
+                                        for p in &peers {
+                                            let pm = engine.peer_manager();
+                                            let mut mgr = pm.lock().await;
+                                            let _ = mgr.add_peer(p.clone());
+                                            let signal = SignalingMessage::Signal { to: p.peer_id, from: peer_id, data: exchange_json.clone() };
+                                            if let Ok(json) = serde_json::to_string(&signal) { let _ = ws_writer.send(tungstenite::Message::Text(json.into())).await; }
+                                        }
+                                        tokio::spawn(async move { if let Err(e) = engine.run().await { eprintln!("[daemon] Engine error: {}", e); } });
+                                    }
+                                }
+                                SignalingMessage::PeerJoined { peer: p } => {
+                                    eprintln!("[daemon] New peer: {:?}", p.peer_id);
+                                    let (pm, connected) = {
+                                        let st = state.lock().await;
+                                        (st.engine_peer_manager.clone(), matches!(st.status, ConnectionStatus::Connected { .. }))
+                                    };
+                                    if connected {
+                                        if let Some(pm) = pm {
+                                            let mut mgr = pm.lock().await;
+                                            if mgr.get_peer(&p.peer_id).is_none() { let _ = mgr.add_peer(p.clone()); }
+                                        }
+                                        let signal = SignalingMessage::Signal { to: p.peer_id, from: peer_id, data: exchange_json.clone() };
+                                        if let Ok(json) = serde_json::to_string(&signal) { let _ = ws_writer.send(tungstenite::Message::Text(json.into())).await; }
+                                    }
+                                    let mut st = state.lock().await;
+                                    st.peers.push(IpcPeerInfo { name: p.peer_id.0.to_string(), virtual_ip: format!("192.168.22.{}", p.virtual_index), connected: false });
+                                    let _ = event_tx.send(DaemonEvent::PeerUpdate { peers: st.peers.clone() });
+                                }
+                                SignalingMessage::PeerLeft { peer_id: p_id } => {
+                                    eprintln!("[daemon] Peer left: {:?}", p_id);
+                                    let mut st = state.lock().await;
+                                    st.peers.retain(|p| p.name != p_id.0.to_string());
+                                    let _ = event_tx.send(DaemonEvent::PeerUpdate { peers: st.peers.clone() });
+                                }
+                                SignalingMessage::Signal { from, data, .. } => {
+                                    eprintln!("[daemon] Signal from {:?}", from);
+                                    if let Ok(ex) = serde_json::from_str::<CandidateExchange>(&data) {
+                                        let udp_c = udp.clone();
+                                        let st_c = state.clone();
+                                        let priv_c = static_private.clone();
+                                        let stun_server_task = stun_server.clone();
+                                        tokio::spawn(async move {
+                                            let (conn_state, result) = crate::net::ice::establish_connectivity(&udp_c, Some(&RealStunClient::new(stun_server_task)), ex.candidates).await;
+                                            if let Ok(selected) = result {
+                                                eprintln!("[daemon] ICE success with {:?}", from);
+                                                let (pm, wp) = { let st = st_c.lock().await; (st.engine_peer_manager.clone(), st.engine_wg_peers.clone()) };
+                                                if let (Some(pm), Some(wp)) = (pm, wp) {
+                                                    let info = { let mgr = pm.lock().await; mgr.get_peer(&from).map(|e| e.info.clone()) };
+                                                    if let Some(info) = info {
+                                                        if let Ok(bytes) = hex::decode(&info.public_key) {
+                                                            if bytes.len() == 32 {
+                                                                let mut b = [0u8; 32]; b.copy_from_slice(&bytes);
+                                                                if let Ok(peer) = WireGuardPeer::new(priv_c, boringtun::x25519::PublicKey::from(b), None, Some(25), 0, Some(selected.remote.addr)) {
+                                                                    wp.lock().await.push(peer);
+                                                                    let _ = pm.lock().await.update_state(&from, PeerConnectionState::Connected);
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            } else { eprintln!("[daemon] ICE failed for {:?}: {:?}", from, conn_state); }
+                                        });
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    tungstenite::Message::Close(_) => break,
+                    tungstenite::Message::Ping(_) => { let _ = ws_writer.send(tungstenite::Message::Pong(tungstenite::Bytes::new())).await; }
+                    _ => {}
+                }
             }
-            Err(e) => {
-                eprintln!("[daemon] WebSocket error: {}", e);
-                break;
-            }
-            _ => {}
         }
     }
-
-    // Connection lost — update state.
     eprintln!("[daemon] Disconnected from signaling server");
     let mut st = state.lock().await;
     st.status = ConnectionStatus::Disconnected;
     st.peers.clear();
-    let _ = event_tx.send(DaemonEvent::StatusUpdate {
-        status: st.status.clone(),
-    });
+    let _ = event_tx.send(DaemonEvent::StatusUpdate { status: st.status.clone() });
 }
