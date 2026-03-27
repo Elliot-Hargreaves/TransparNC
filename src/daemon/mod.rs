@@ -8,9 +8,9 @@ use crate::common::ipc::{
     ConnectionStatus, DaemonCommand, DaemonEvent, IpcPeerInfo, read_message, write_message,
 };
 use crate::common::messages::{
-    CandidateExchange, NetworkId, PeerId, PeerInfo, SignalingMessage,
+    CandidateExchange, NetworkId, PeerId, SignalingMessage,
 };
-use crate::net::ice::{Candidate, ConnectivityState, gather_candidates};
+use crate::net::nat::RealStunClient;
 use crate::net::peer::{PeerConnectionState, PeerManager, PeerStore};
 use crate::net::tun::{TunConfig, TunDevice};
 use crate::net::wireguard::{KeyPair, WireGuardPeer};
@@ -342,8 +342,18 @@ async fn connect_to_signaling(
         }
     };
 
-    // Trace local candidates
-    let local_candidates = crate::net::ice::gather_host_candidates(local_port);
+    // Trace candidates (host + STUN)
+    let stun_server = "stun.l.google.com:19302".to_string();
+    let stun_client = RealStunClient::new(stun_server);
+    let local_candidates = match crate::net::ice::gather_candidates(Some(&stun_client), &udp).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[daemon] Failed to gather candidates: {}", e);
+            // Fallback to host candidates only if full gathering fails completely
+            crate::net::ice::gather_host_candidates(local_port)
+        }
+    };
+
     for candidate in &local_candidates {
         eprintln!(
             "[daemon] Gathered local ICE candidate: {:?} ({})",
@@ -436,7 +446,13 @@ async fn connect_to_signaling(
                                 .collect();
 
                             // Instantiate VpnEngine.
-                            let engine = match crate::net::VpnEngine::with_socket(tun, udp.clone(), None) {
+                            let stun_server = "stun.l.google.com:19302".to_string();
+                            let stun_client = RealStunClient::new(stun_server);
+                            let engine = match crate::net::VpnEngine::with_socket(
+                                tun,
+                                udp.clone(),
+                                Some(Box::new(stun_client)),
+                            ) {
                                 Ok(e) => e,
                                 Err(e) => {
                                     eprintln!("[daemon] Failed to create VpnEngine: {}", e);
@@ -579,9 +595,11 @@ async fn connect_to_signaling(
                                 for c in &remote_candidates {
                                     eprintln!("[daemon]   Remote candidate: {:?} @ {}", c.candidate_type, c.addr);
                                 }
+                                let stun_server = "stun.l.google.com:19302".to_string();
+                                let stun_client = RealStunClient::new(stun_server);
                                 let (conn_state, result) = crate::net::ice::establish_connectivity(
                                     &udp_clone,
-                                    None, // STUN handled by VpnEngine/manually if needed
+                                    Some(&stun_client),
                                     remote_candidates,
                                 )
                                 .await;
