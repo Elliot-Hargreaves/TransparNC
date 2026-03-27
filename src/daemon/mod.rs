@@ -393,19 +393,16 @@ async fn connect_to_signaling(
     let public_key = hex::encode(keypair.public.as_bytes());
     let stun_server = "stun.l.google.com:19302".to_string();
 
-    // Bind a temporary socket just to gather our initial candidates for the
-    // Join message. Each peer connection will later bind its own ephemeral
-    // socket for ICE and the WireGuard data plane.
-    let init_socket = match UdpSocket::bind("0.0.0.0:0").await {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("[daemon] Failed to bind initial socket: {}", e);
-            return;
-        }
+    // Build a lightweight trigger signal using only host candidates.
+    // The real per-peer candidates (with the correct ephemeral port) are
+    // exchanged later inside handle_peer_signal via peer_signal_tx.
+    // Doing STUN here on a throwaway socket would advertise a port that is
+    // immediately dropped, causing the remote peer's ICE probes to go nowhere.
+    let init_exchange_json = {
+        let placeholder_candidates = crate::net::ice::gather_host_candidates(0);
+        let exchange = CandidateExchange { candidates: placeholder_candidates };
+        serde_json::to_string(&exchange).unwrap_or_default()
     };
-    let (_, init_exchange_json) = gather_candidates_for_socket(&init_socket, &stun_server).await;
-    // The init socket is only used for gathering; drop it now.
-    drop(init_socket);
 
     let peer_id = PeerId(Uuid::new_v4());
     let join_msg = SignalingMessage::Join { network_id, peer_id, public_key };
