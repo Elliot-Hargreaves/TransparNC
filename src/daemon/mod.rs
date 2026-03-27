@@ -357,47 +357,37 @@ async fn connect_to_signaling(
                             assigned_index
                         );
 
-                        // Find an available 172.X.0.N IP.
-                        let mut assigned_ip = None;
-                        let mut tun_device = None;
+                        // Use the hardcoded 172.222.0.N IP.
+                        let ip_str = format!("172.222.0.{}", assigned_index);
+                        let ip = ip_str.parse::<std::net::Ipv4Addr>().unwrap();
 
-                        // Try subnets from 172.16.0.0/24 up to 172.31.0.0/24
-                        for x in 16..=31 {
-                            let ip_str = format!("172.{}.0.{}", x, assigned_index);
-                            let ip = match ip_str.parse::<std::net::Ipv4Addr>() {
-                                Ok(ip) => ip,
-                                Err(_) => continue,
-                            };
+                        let config = TunConfig {
+                            name: "transparnc0".to_string(),
+                            address: ip,
+                            netmask: "255.255.255.0".parse().unwrap(),
+                            mtu: 1420,
+                        };
 
-                            let config = TunConfig {
-                                name: "transparnc0".to_string(),
-                                address: ip,
-                                netmask: "255.255.255.0".parse().unwrap(),
-                                mtu: 1420,
-                            };
-
-                            match TunDevice::new(config) {
-                                Ok(tun) => {
-                                    eprintln!("[daemon] Successfully created TUN device with IP {}", ip_str);
-                                    assigned_ip = Some(ip_str);
-                                    tun_device = Some(tun);
-                                    break;
-                                }
-                                Err(e) => {
-                                    eprintln!(
-                                        "[daemon] Failed to create TUN device with IP {}: {}. Trying next subnet...",
-                                        ip_str, e
-                                    );
-                                }
+                        let (assigned_ip, tun_device) = match TunDevice::new(config) {
+                            Ok(tun) => {
+                                eprintln!("[daemon] Successfully created TUN device with IP {}", ip_str);
+                                (Some(ip_str), Some(tun))
                             }
-                        }
+                            Err(e) => {
+                                eprintln!(
+                                    "[daemon] Failed to create TUN device with IP {}: {}",
+                                    ip_str, e
+                                );
+                                (None, None)
+                            }
+                        };
 
                         if let (Some(ip), Some(tun)) = (assigned_ip, tun_device) {
                             let ipc_peers: Vec<IpcPeerInfo> = peers
                                 .iter()
                                 .map(|p| IpcPeerInfo {
                                     name: p.peer_id.0.to_string(),
-                                    virtual_ip: format!("172.?.0.{}", p.virtual_index),
+                                    virtual_ip: format!("172.222.0.{}", p.virtual_index),
                                     connected: false,
                                 })
                                 .collect();
@@ -432,7 +422,7 @@ async fn connect_to_signaling(
                         let mut st = state.lock().await;
                         st.peers.push(IpcPeerInfo {
                             name: peer.peer_id.0.to_string(),
-                            virtual_ip: format!("172.?.0.{}", peer.virtual_index),
+                            virtual_ip: format!("172.222.0.{}", peer.virtual_index),
                             connected: false,
                         });
                         let _ = event_tx.send(DaemonEvent::PeerUpdate {
