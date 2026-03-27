@@ -41,7 +41,7 @@ struct Cli {
     network: Option<String>,
 
     /// Signaling server WebSocket URL (used in headless mode).
-    #[arg(long, default_value = "ws://coffy.dev:8080")]
+    #[arg(long, default_value = "coffy.dev:8080")]
     signaling_server: String,
 
     /// Path to the IPC Unix domain socket (used in daemon/GUI mode).
