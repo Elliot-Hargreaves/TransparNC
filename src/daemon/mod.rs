@@ -10,7 +10,7 @@ use crate::common::ipc::{
 use crate::common::messages::{
     CandidateExchange, NetworkId, PeerId, SignalingMessage,
 };
-use crate::net::ice::{CandidateType, IceError};
+use crate::net::ice::CandidateType;
 use crate::net::nat::RealStunClient;
 use crate::net::peer::{PeerConnectionState, PeerManager, PeerStore};
 use crate::net::tun::{TunConfig, TunDevice};
@@ -375,6 +375,7 @@ async fn connect_to_signaling(
                 eprintln!("[daemon] STUN gathered. Updating exchange and re-signaling.");
                 exchange_json = new_json.clone();
                 if let Ok(new_ex) = serde_json::from_str::<CandidateExchange>(&new_json) {
+                    local_candidates = new_ex.candidates.clone();
                     exchange.candidates = new_ex.candidates;
                 }
                 let peers_to_signal = {
@@ -465,9 +466,9 @@ async fn connect_to_signaling(
                                         let udp_c = udp.clone();
                                         let st_c = state.clone();
                                         let priv_c = static_private.clone();
-                                        let stun_server_task = stun_server.clone();
+                                        let local_c = local_candidates.clone();
                                         tokio::spawn(async move {
-                                            let (conn_state, result) = crate::net::ice::establish_connectivity(&udp_c, Some(&RealStunClient::new(stun_server_task)), ex.candidates).await;
+                                            let (conn_state, result) = crate::net::ice::establish_connectivity_with_local(&udp_c, local_c, ex.candidates).await;
                                             if let Ok(selected) = result {
                                                 eprintln!("[daemon] ICE success with {:?}", from);
                                                 let (pm, wp) = { let st = st_c.lock().await; (st.engine_peer_manager.clone(), st.engine_wg_peers.clone()) };

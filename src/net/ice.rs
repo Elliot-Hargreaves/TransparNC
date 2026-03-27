@@ -431,6 +431,18 @@ pub async fn establish_connectivity(
         Err(e) => return (ConnectivityState::Failed, Err(e)),
     };
 
+    establish_connectivity_with_local(socket, local_candidates, remote_candidates).await
+}
+
+/// Like [`establish_connectivity`] but skips the gathering phase, using the
+/// already-gathered `local_candidates` directly. Use this when candidates have
+/// already been collected at startup to avoid a redundant (and potentially
+/// slow or failing) STUN request during the connectivity check phase.
+pub async fn establish_connectivity_with_local(
+    socket: &UdpSocket,
+    local_candidates: Vec<Candidate>,
+    remote_candidates: Vec<Candidate>,
+) -> (ConnectivityState, Result<CandidatePair, IceError>) {
     // --- Checking ---
     let pairs = form_candidate_pairs(&local_candidates, &remote_candidates);
     if pairs.is_empty() {
