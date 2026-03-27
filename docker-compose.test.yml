@@ -9,7 +9,7 @@ services:
     networks:
       vpn_net:
         ipv4_address: 172.20.0.2
-    command: --local-port 51820 --tun-ip 10.0.0.1
+    command: --local-port 51820 --tun-ip 192.168.22.1
 
   peer2:
     build: .
@@ -21,7 +21,7 @@ services:
     networks:
       vpn_net:
         ipv4_address: 172.20.0.3
-    command: --local-port 51820 --tun-ip 10.0.0.2
+    command: --local-port 51820 --tun-ip 192.168.22.2
 
 networks:
   vpn_net:

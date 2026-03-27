@@ -47,7 +47,7 @@ services:
       ip route del default || true &&
       ip route add default via 172.40.0.2 &&
       sleep 10 &&
-      /usr/local/bin/transpar_nc --local-port 51820 --tun-ip 10.0.0.1 --stun-server 172.30.0.100:3478
+      /usr/local/bin/transpar_nc --local-port 51820 --tun-ip 192.168.22.1 --stun-server 172.30.0.100:3478
       "
     depends_on:
       - nat-gateway
@@ -63,7 +63,7 @@ services:
       public_net:
         ipv4_address: 172.30.0.3
     tty: true
-    command: ["--local-port", "51820", "--tun-ip", "10.0.0.2", "--stun-server", "172.30.0.100:3478"]
+    command: ["--local-port", "51820", "--tun-ip", "192.168.22.2", "--stun-server", "172.30.0.100:3478"]
     depends_on:
       - stun-server
 

@@ -181,7 +181,7 @@ async fn handle_command(
             // TODO: actually create TUN and start WireGuard here.
             // For now, simulate a successful connection.
             st.status = ConnectionStatus::Connected {
-                virtual_ip: "10.0.0.1".to_string(),
+                virtual_ip: "192.168.22.1".to_string(),
             };
             let _ = event_tx.send(DaemonEvent::StatusUpdate {
                 status: st.status.clone(),
@@ -357,8 +357,8 @@ async fn connect_to_signaling(
                             assigned_index
                         );
 
-                        // Use the hardcoded 172.222.0.N IP.
-                        let ip_str = format!("172.222.0.{}", assigned_index);
+                        // Use the hardcoded 192.168.22.N IP.
+                        let ip_str = format!("192.168.22.{}", assigned_index);
                         let ip = ip_str.parse::<std::net::Ipv4Addr>().unwrap();
 
                         let config = TunConfig {
@@ -387,7 +387,7 @@ async fn connect_to_signaling(
                                 .iter()
                                 .map(|p| IpcPeerInfo {
                                     name: p.peer_id.0.to_string(),
-                                    virtual_ip: format!("172.222.0.{}", p.virtual_index),
+                                    virtual_ip: format!("192.168.22.{}", p.virtual_index),
                                     connected: false,
                                 })
                                 .collect();
@@ -422,7 +422,7 @@ async fn connect_to_signaling(
                         let mut st = state.lock().await;
                         st.peers.push(IpcPeerInfo {
                             name: peer.peer_id.0.to_string(),
-                            virtual_ip: format!("172.222.0.{}", peer.virtual_index),
+                            virtual_ip: format!("192.168.22.{}", peer.virtual_index),
                             connected: false,
                         });
                         let _ = event_tx.send(DaemonEvent::PeerUpdate {

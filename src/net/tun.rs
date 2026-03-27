@@ -20,13 +20,13 @@ pub struct TunConfig {
 impl Default for TunConfig {
     /// Returns a default configuration with:
     /// - Name: "utun%d" (automatically assigned by OS)
-    /// - Address: 172.222.0.1
+    /// - Address: 192.168.22.1
     /// - Netmask: 255.255.255.0
     /// - MTU: 1420 (WireGuard default)
     fn default() -> Self {
         Self {
             name: "utun%d".to_string(),
-            address: Ipv4Addr::new(172, 222, 0, 1),
+            address: Ipv4Addr::new(192, 168, 22, 1),
             netmask: Ipv4Addr::new(255, 255, 255, 0),
             mtu: 1420,
         }
@@ -68,7 +68,7 @@ mod tests {
     #[test]
     fn test_tun_config_default() {
         let config = TunConfig::default();
-        assert_eq!(config.address, Ipv4Addr::new(172, 222, 0, 1));
+        assert_eq!(config.address, Ipv4Addr::new(192, 168, 22, 1));
         assert_eq!(config.mtu, 1420);
     }
 

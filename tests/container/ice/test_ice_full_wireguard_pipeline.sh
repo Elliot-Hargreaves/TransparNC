@@ -63,7 +63,7 @@ echo "--- Full Pipeline: Starting VPN engines ---"
 docker exec -d ice-peer-1 \
     transpar_nc \
     --local-port 51820 \
-    --tun-ip 10.0.0.1 \
+    --tun-ip 192.168.22.1 \
     --private-key "$PEER1_PRIVKEY" \
     --peer-key "$PEER2_PUBKEY" \
     --peer-endpoint "$PEER2_SRFLX" \
@@ -73,7 +73,7 @@ docker exec -d ice-peer-1 \
 docker exec -d ice-peer-2 \
     transpar_nc \
     --local-port 51821 \
-    --tun-ip 10.0.0.2 \
+    --tun-ip 192.168.22.2 \
     --private-key "$PEER2_PRIVKEY" \
     --peer-key "$PEER1_PUBKEY" \
     --peer-endpoint "$PEER1_SRFLX" \
@@ -95,24 +95,24 @@ echo "$PEER2_TUN"
 RESULT=0
 
 # Check that TUN interfaces exist with the expected IPs.
-if echo "$PEER1_TUN" | grep -q "10.0.0.1"; then
-    echo "SUCCESS: Peer-1 has TUN interface with 10.0.0.1"
+if echo "$PEER1_TUN" | grep -q "192.168.22.1"; then
+    echo "SUCCESS: Peer-1 has TUN interface with 192.168.22.1"
 else
-    echo "FAILURE: Peer-1 missing TUN interface with 10.0.0.1"
+    echo "FAILURE: Peer-1 missing TUN interface with 192.168.22.1"
     RESULT=1
 fi
 
-if echo "$PEER2_TUN" | grep -q "10.0.0.2"; then
-    echo "SUCCESS: Peer-2 has TUN interface with 10.0.0.2"
+if echo "$PEER2_TUN" | grep -q "192.168.22.2"; then
+    echo "SUCCESS: Peer-2 has TUN interface with 192.168.22.2"
 else
-    echo "FAILURE: Peer-2 missing TUN interface with 10.0.0.2"
+    echo "FAILURE: Peer-2 missing TUN interface with 192.168.22.2"
     RESULT=1
 fi
 
 echo "--- Full Pipeline: Ping test over WireGuard tunnel ---"
 
 # Peer-1 pings peer-2's virtual IP through the WireGuard tunnel.
-PING_RESULT=$(docker exec ice-peer-1 ping -c 3 -W 5 10.0.0.2 2>&1) || true
+PING_RESULT=$(docker exec ice-peer-1 ping -c 3 -W 5 192.168.22.2 2>&1) || true
 echo "$PING_RESULT"
 
 if echo "$PING_RESULT" | grep -q " 0% packet loss"; then
@@ -125,7 +125,7 @@ else
 fi
 
 # Reverse direction: peer-2 pings peer-1.
-PING_RESULT2=$(docker exec ice-peer-2 ping -c 3 -W 5 10.0.0.1 2>&1) || true
+PING_RESULT2=$(docker exec ice-peer-2 ping -c 3 -W 5 192.168.22.1 2>&1) || true
 echo "$PING_RESULT2"
 
 if echo "$PING_RESULT2" | grep -q " 0% packet loss"; then

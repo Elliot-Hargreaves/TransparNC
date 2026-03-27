@@ -25,15 +25,15 @@ echo "Peer 2 Public Key: $PEER2_PUB"
 echo "--- 4. Starting nodes with full configuration ---"
 # Remove any leftover named containers from a previous run to avoid conflicts.
 docker rm -f peer1 peer2 2>/dev/null || true
-# Peer 1 config: local-port 51820, tun-ip 10.0.0.1, peer is Peer 2 at 172.20.0.3:51820
+# Peer 1 config: local-port 51820, tun-ip 192.168.22.1, peer is Peer 2 at 172.20.0.3:51820
 docker compose -f docker-compose.test.yml run -d --name peer1 peer1 \
-    --local-port 51820 --tun-ip 10.0.0.1 \
+    --local-port 51820 --tun-ip 192.168.22.1 \
     --private-key "$PEER1_PRIV" \
     --peer-key "$PEER2_PUB" --peer-endpoint "172.20.0.3:51820"
 
-# Peer 2 config: local-port 51820, tun-ip 10.0.0.2, peer is Peer 1 at 172.20.0.2:51820
+# Peer 2 config: local-port 51820, tun-ip 192.168.22.2, peer is Peer 1 at 172.20.0.2:51820
 docker compose -f docker-compose.test.yml run -d --name peer2 peer2 \
-    --local-port 51820 --tun-ip 10.0.0.2 \
+    --local-port 51820 --tun-ip 192.168.22.2 \
     --private-key "$PEER2_PRIV" \
     --peer-key "$PEER1_PUB" --peer-endpoint "172.20.0.2:51820"
 
@@ -41,8 +41,8 @@ echo "Waiting for nodes to initialize..."
 sleep 5
 
 echo "--- 5. Verification Phase: Ping Test ---"
-echo "Pinging peer2 (10.0.0.2) from peer1..."
-if docker exec peer1 ping -c 4 10.0.0.2; then
+echo "Pinging peer2 (192.168.22.2) from peer1..."
+if docker exec peer1 ping -c 4 192.168.22.2; then
     echo "SUCCESS: Ping test passed!"
     RESULT=0
 else

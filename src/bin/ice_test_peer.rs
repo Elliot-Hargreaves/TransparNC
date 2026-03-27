@@ -56,7 +56,7 @@ struct Cli {
     wireguard: bool,
 
     /// Virtual TUN IP for WireGuard mode.
-    #[arg(long, default_value = "10.0.0.1")]
+    #[arg(long, default_value = "192.168.22.1")]
     tun_ip: String,
 
     /// Remote peer's WireGuard public key (hex) for WireGuard mode.

@@ -34,7 +34,7 @@ A script to automate the entire test lifecycle.
     - Extract public keys from both peers.
     - Restart or signal peers with each other's configuration.
 - [x] **Verification Phase**:
-    - Execute `ping -c 4 10.0.0.2` from `peer1` (targeting `peer2`'s virtual IP).
+    - Execute `ping -c 4 192.168.22.2` from `peer1` (targeting `peer2`'s virtual IP).
     - Parse output for success/failure.
 - [x] **Cleanup Phase**:
     - Stop and remove containers and networks.

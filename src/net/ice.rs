@@ -508,7 +508,7 @@ mod tests {
             Candidate::new("[::1]:5000".parse().unwrap(), CandidateType::Host),
         ];
         let remote = vec![Candidate::new(
-            "10.0.0.1:6000".parse().unwrap(),
+            "192.168.22.1:6000".parse().unwrap(),
             CandidateType::Host,
         )];
 
@@ -532,7 +532,7 @@ mod tests {
             ),
         ];
         let remote = vec![Candidate::new(
-            "10.0.0.1:6000".parse().unwrap(),
+            "192.168.22.1:6000".parse().unwrap(),
             CandidateType::Host,
         )];
 
