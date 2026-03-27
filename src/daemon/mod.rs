@@ -393,14 +393,13 @@ async fn connect_to_signaling(
     let public_key = hex::encode(keypair.public.as_bytes());
     let stun_server = "stun.l.google.com:19302".to_string();
 
-    // Build a lightweight trigger signal using only host candidates.
-    // The real per-peer candidates (with the correct ephemeral port) are
-    // exchanged later inside handle_peer_signal via peer_signal_tx.
-    // Doing STUN here on a throwaway socket would advertise a port that is
-    // immediately dropped, causing the remote peer's ICE probes to go nowhere.
+    // Send an empty candidate list as the trigger signal. Its only purpose
+    // is to prompt the remote peer to start its ICE flow toward us. The
+    // remote peer will respond with its real STUN-discovered candidates,
+    // which will trigger our own ICE run. Sending port-0 placeholder
+    // candidates here would cause the remote peer to probe invalid addresses.
     let init_exchange_json = {
-        let placeholder_candidates = crate::net::ice::gather_host_candidates(0);
-        let exchange = CandidateExchange { candidates: placeholder_candidates };
+        let exchange = CandidateExchange { candidates: vec![] };
         serde_json::to_string(&exchange).unwrap_or_default()
     };
 
@@ -651,7 +650,28 @@ async fn handle_peer_signal(
     //    which ephemeral port to direct its ICE probes at.
     let _ = peer_signal_tx.send((from, candidates_json)).await;
 
-    // 4. Run ICE on the same socket whose port we just advertised.
+    // 4. If remote_candidates is empty this was a trigger signal — the remote
+    //    peer just knocked to tell us to start our ICE flow. We've sent our
+    //    real candidates back; reset the peer state to Discovered so that
+    //    when the remote peer responds with its real candidates the guard in
+    //    connect_to_signaling will accept that Signal and run a proper ICE
+    //    check. There is nothing to probe yet.
+    if remote_candidates.is_empty() {
+        eprintln!(
+            "[daemon] Trigger signal from {:?}: sent our candidates, \
+             awaiting their real candidates to start ICE.",
+            from
+        );
+        let st = state.lock().await;
+        if let Some(pm) = &st.peer_manager {
+            let mut mgr = pm.lock().await;
+            let _ = mgr.update_state(&from, PeerConnectionState::Discovered);
+        }
+        return;
+    }
+
+    // 5. Run ICE on the same socket whose port we just advertised.
+    //    remote_candidates are real (non-zero port) at this point.
     eprintln!("[daemon] Starting ICE connectivity check with {:?}", from);
     for c in &remote_candidates {
         eprintln!("[daemon]   Remote candidate: {:?} @ {}", c.candidate_type, c.addr);
