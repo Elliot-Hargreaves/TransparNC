@@ -9,10 +9,11 @@ use crate::net::peer::PeerManager;
 use crate::net::tun::TunDevice;
 use crate::net::wireguard::WireGuardPeer;
 use boringtun::noise::TunnResult;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
 
 /// Default interval between heartbeat checks in seconds.
 const HEARTBEAT_INTERVAL_SECS: u64 = 15;
@@ -23,30 +24,123 @@ const STALE_TIMEOUT_SECS: u64 = 30;
 /// Duration after which a stale peer is considered disconnected.
 const DISCONNECT_TIMEOUT_SECS: u64 = 90;
 
-/// Shared TUN I/O halves, split once and shared across all per-peer engines.
+/// Capacity of each per-peer TUN packet channel.
 ///
-/// Splitting the TUN device once and wrapping each half in an `Arc<Mutex<…>>`
-/// lets multiple `VpnEngine` instances (one per peer) read from and write to
-/// the same virtual interface without re-splitting or unsafe sharing.
-pub type SharedTunReader = Arc<Mutex<tokio::io::ReadHalf<tokio_tun::Tun>>>;
+/// Sized to absorb a short burst of packets while the peer's forwarding loop
+/// catches up, without consuming excessive memory.
+const TUN_CHANNEL_CAPACITY: usize = 64;
+
+/// Shared TUN writer — used by the UDP→TUN forwarding loop across all engines.
 pub type SharedTunWriter = Arc<Mutex<tokio::io::WriteHalf<tokio_tun::Tun>>>;
 
-/// Splits a `TunDevice` into a shared reader/writer pair suitable for use
-/// across multiple `VpnEngine` instances.
-pub fn split_tun(tun: TunDevice) -> (SharedTunReader, SharedTunWriter) {
-    let (r, w) = tokio::io::split(tun.device);
-    (Arc::new(Mutex::new(r)), Arc::new(Mutex::new(w)))
+/// A handle that allows new peer engines to register themselves with the
+/// single TUN reader dispatcher task.
+///
+/// Each peer registers its virtual index and receives a dedicated channel
+/// receiver. The dispatcher routes incoming TUN packets to the correct peer
+/// based on the destination IP's last octet.
+#[derive(Clone)]
+pub struct TunDispatcherHandle {
+    /// Sender side of the registration channel.
+    register_tx: mpsc::Sender<(u8, mpsc::Sender<Vec<u8>>)>,
+}
+
+impl TunDispatcherHandle {
+    /// Registers a peer with the given virtual index and returns a receiver
+    /// that will yield TUN packets destined for that peer.
+    pub async fn register(&self, virtual_index: u8) -> mpsc::Receiver<Vec<u8>> {
+        let (tx, rx) = mpsc::channel(TUN_CHANNEL_CAPACITY);
+        // Ignore send errors — they only occur if the dispatcher task has
+        // already exited (e.g. TUN device closed), in which case the engine
+        // will naturally receive nothing and shut down.
+        let _ = self.register_tx.send((virtual_index, tx)).await;
+        rx
+    }
+}
+
+/// Splits a `TunDevice` and spawns a single dispatcher task that owns the
+/// read half. Returns a `TunDispatcherHandle` for registering per-peer
+/// channels and a `SharedTunWriter` for writing decapsulated packets back.
+///
+/// The dispatcher reads IP packets from the TUN interface and routes each one
+/// to the registered peer whose virtual index matches the packet's destination
+/// IP last octet (e.g. 192.168.22.3 → index 3). This eliminates the mutex
+/// contention that arose from sharing a single `Arc<Mutex<ReadHalf<Tun>>>`
+/// across all peer engines.
+pub fn split_tun(tun: TunDevice) -> (TunDispatcherHandle, SharedTunWriter) {
+    let (read_half, write_half) = tokio::io::split(tun.device);
+    let writer = Arc::new(Mutex::new(write_half));
+
+    // Registration channel: peers send (virtual_index, sender) to subscribe.
+    let (register_tx, register_rx) = mpsc::channel::<(u8, mpsc::Sender<Vec<u8>>)>(32);
+
+    tokio::spawn(run_tun_dispatcher(read_half, register_rx));
+
+    let handle = TunDispatcherHandle { register_tx };
+    (handle, writer)
+}
+
+/// The dispatcher task: owns the TUN read half and routes packets to peers.
+///
+/// Runs until the TUN device is closed or an unrecoverable read error occurs.
+/// New peers can register at any time by sending on the registration channel.
+async fn run_tun_dispatcher(
+    mut reader: tokio::io::ReadHalf<tokio_tun::Tun>,
+    mut register_rx: mpsc::Receiver<(u8, mpsc::Sender<Vec<u8>>)>,
+) {
+    let mut peers: HashMap<u8, mpsc::Sender<Vec<u8>>> = HashMap::new();
+    let mut buf = [0u8; 2048];
+
+    loop {
+        tokio::select! {
+            // Accept new peer registrations without blocking packet forwarding.
+            reg = register_rx.recv() => {
+                // Registration channel closed — no more peers will register,
+                // but we keep running to drain remaining packets.
+                if let Some((index, tx)) = reg {
+                    log::debug!("[tun-dispatcher] Registered peer with virtual index {}", index);
+                    peers.insert(index, tx);
+                }
+            }
+            // Read the next IP packet from the TUN interface.
+            result = reader.read(&mut buf) => {
+                match result {
+                    Ok(0) | Err(_) => {
+                        log::warn!("[tun-dispatcher] TUN read returned 0 or error — shutting down dispatcher");
+                        break;
+                    }
+                    Ok(n) if n < 20 => {
+                        // Too short to be a valid IPv4 packet; skip silently.
+                    }
+                    Ok(n) => {
+                        // Route by destination IP last octet (192.168.22.<index>).
+                        let dest_index = buf[19];
+                        if let Some(tx) = peers.get(&dest_index) {
+                            let packet = buf[..n].to_vec();
+                            if tx.send(packet).await.is_err() {
+                                // Peer engine has exited; remove the stale entry.
+                                log::debug!("[tun-dispatcher] Peer {} channel closed, removing", dest_index);
+                                peers.remove(&dest_index);
+                            }
+                        } else {
+                            log::debug!("[tun-dispatcher] No peer registered for dest index {}", dest_index);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// The main VPN engine that connects TUN interface with a single WireGuard peer.
 ///
 /// Each peer connection gets its own `VpnEngine` instance with a dedicated UDP
 /// socket (the one used for ICE hole-punching, now "upgraded" to the data plane).
-/// All engines share the same TUN reader/writer pair so IP packets are correctly
-/// routed regardless of which peer sent them.
+/// Packets from the TUN interface arrive via a dedicated `mpsc` channel fed by
+/// the single `TunDispatcher` task, eliminating mutex contention across peers.
 pub struct VpnEngine {
-    /// Shared TUN reader — used by the TUN→UDP forwarding loop.
-    tun_reader: SharedTunReader,
+    /// Per-peer channel receiver for TUN packets destined for this peer.
+    tun_rx: mpsc::Receiver<Vec<u8>>,
     /// Shared TUN writer — used by the UDP→TUN forwarding loop.
     tun_writer: SharedTunWriter,
     /// The WireGuard tunnel for this specific peer.
@@ -62,13 +156,14 @@ pub struct VpnEngine {
 impl VpnEngine {
     /// Creates a new per-peer VPN engine.
     ///
-    /// `tun_reader` and `tun_writer` are shared across all peer engines.
+    /// `tun_rx` is the per-peer channel receiver from the `TunDispatcher`.
+    /// `tun_writer` is shared across all peer engines for writing decapsulated packets.
     /// `udp` is the socket that completed ICE hole-punching — it already has
     /// a working path to the remote peer and must not be rebound.
     /// `wg_peer` is the WireGuard tunnel pre-configured with the remote endpoint.
     /// `virtual_index` is the peer's assigned subnet index (e.g. 2 for 192.168.22.2).
     pub fn new(
-        tun_reader: SharedTunReader,
+        tun_rx: mpsc::Receiver<Vec<u8>>,
         tun_writer: SharedTunWriter,
         udp: Arc<UdpSocket>,
         wg_peer: WireGuardPeer,
@@ -76,7 +171,7 @@ impl VpnEngine {
         virtual_index: u8,
     ) -> Self {
         Self {
-            tun_reader,
+            tun_rx,
             tun_writer,
             wg_peer: Arc::new(Mutex::new(wg_peer)),
             peer_manager,
@@ -88,51 +183,37 @@ impl VpnEngine {
     /// Runs the packet processing loops for this peer connection.
     ///
     /// Spawns two tasks:
-    /// - TUN→UDP: reads IP packets destined for this peer's virtual IP,
-    ///   WireGuard-encapsulates them, and sends them over the UDP socket.
+    /// - TUN→UDP: receives IP packets from the per-peer channel (fed by the
+    ///   TUN dispatcher), WireGuard-encapsulates them, and sends them over UDP.
     /// - UDP→TUN: receives encrypted packets from the peer, decapsulates them,
     ///   and writes the plaintext IP packets back to the TUN interface.
     pub async fn run(self) -> anyhow::Result<()> {
         let wg_peer = self.wg_peer.clone();
         let udp = self.udp.clone();
-        let tun_reader = self.tun_reader.clone();
+        let mut tun_rx = self.tun_rx;
         let tun_writer = self.tun_writer.clone();
         let virtual_index = self.virtual_index;
         let peer_manager = self.peer_manager.clone();
 
-        // TUN -> UDP loop: forward packets destined for this peer's virtual IP.
+        // TUN -> UDP loop: forward packets received from the dispatcher channel.
         let tun_to_udp = {
             let wg_peer = wg_peer.clone();
             let udp = udp.clone();
             tokio::spawn(async move {
-                let mut buf = [0u8; 2048];
                 let mut out = [0u8; 2048];
-                loop {
-                    let n = {
-                        let mut reader = tun_reader.lock().await;
-                        match reader.read(&mut buf).await {
-                            Ok(0) => break,
-                            Ok(n) => n,
-                            Err(e) => {
-                                eprintln!("[vpn] TUN read error: {}", e);
-                                break;
-                            }
-                        }
-                    };
-
+                while let Some(buf) = tun_rx.recv().await {
+                    let n = buf.len();
                     if n < 20 {
                         continue;
                     }
 
-                    // Only forward packets whose destination IP matches this peer's
-                    // virtual index (192.168.22.<virtual_index>).
-                    let dest_index = buf[19];
-                    if dest_index != virtual_index {
-                        continue;
-                    }
-
                     let dest_ip = format!("{}.{}.{}.{}", buf[16], buf[17], buf[18], buf[19]);
-                    eprintln!("[vpn] Captured {} bytes from TUN. Dest IP: {}", n, dest_ip);
+                    log::debug!(
+                        "[vpn] Captured {} bytes from TUN. Dest IP: {} (index {})",
+                        n,
+                        dest_ip,
+                        virtual_index
+                    );
 
                     let mut peer = wg_peer.lock().await;
                     match peer.encapsulate(&buf[..n], &mut out) {
@@ -140,18 +221,27 @@ impl VpnEngine {
                             if let Some(endpoint) = peer.endpoint() {
                                 match udp.send_to(packet, endpoint).await {
                                     Ok(_) => {
-                                        eprintln!("[vpn] Sent {} encrypted bytes to {} ({})", packet.len(), dest_ip, endpoint);
+                                        log::debug!(
+                                            "[vpn] Sent {} encrypted bytes to {} ({})",
+                                            packet.len(),
+                                            dest_ip,
+                                            endpoint
+                                        );
                                     }
                                     Err(e) => {
-                                        eprintln!("[vpn] Failed to send UDP to {}: {}", endpoint, e);
+                                        log::warn!(
+                                            "[vpn] Failed to send UDP to {}: {}",
+                                            endpoint,
+                                            e
+                                        );
                                     }
                                 }
                             } else {
-                                eprintln!("[vpn] No endpoint for peer {}", dest_ip);
+                                log::warn!("[vpn] No endpoint for peer {}", dest_ip);
                             }
                         }
                         TunnResult::Err(e) => {
-                            eprintln!("[vpn] WG encapsulation error for {}: {:?}", dest_ip, e);
+                            log::warn!("[vpn] WG encapsulation error for {}: {:?}", dest_ip, e);
                         }
                         _ => {}
                     }
@@ -174,9 +264,13 @@ impl VpnEngine {
                         | TunnResult::WriteToTunnelV6(packet, _) => {
                             let mut writer = tun_writer.lock().await;
                             if let Err(e) = writer.write_all(packet).await {
-                                eprintln!("[vpn] TUN write error: {}", e);
+                                log::warn!("[vpn] TUN write error: {}", e);
                             } else {
-                                eprintln!("[vpn] Wrote {} bytes to TUN from {}", packet.len(), addr);
+                                log::debug!(
+                                    "[vpn] Wrote {} bytes to TUN from {}",
+                                    packet.len(),
+                                    addr
+                                );
                             }
                         }
                         TunnResult::WriteToNetwork(packet) => {
@@ -184,7 +278,7 @@ impl VpnEngine {
                             let _ = udp.send_to(packet, addr).await;
                         }
                         TunnResult::Err(e) => {
-                            eprintln!("[vpn] WG decapsulation error from {}: {:?}", addr, e);
+                            log::warn!("[vpn] WG decapsulation error from {}: {:?}", addr, e);
                         }
                         _ => {}
                     }

@@ -435,18 +435,18 @@ impl App {
             }
         };
 
-    let commit_info = if build::SHORT_COMMIT.is_empty() {
-        "no-git".to_string()
-    } else {
-        build::SHORT_COMMIT[..build::SHORT_COMMIT.len().min(7)].to_string()
-    };
+        let commit_info = if build::SHORT_COMMIT.is_empty() {
+            "no-git".to_string()
+        } else {
+            build::SHORT_COMMIT[..build::SHORT_COMMIT.len().min(7)].to_string()
+        };
 
-    let version_info = format!(
-        "v{} ({}, {})",
-        build::PKG_VERSION,
-        commit_info,
-        build::BUILD_TIME_2822
-    );
+        let version_info = format!(
+            "v{} ({}, {})",
+            build::PKG_VERSION,
+            commit_info,
+            build::BUILD_TIME_2822
+        );
 
         let header = row![
             column![

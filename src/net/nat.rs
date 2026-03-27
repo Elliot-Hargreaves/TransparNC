@@ -42,7 +42,7 @@ impl RealStunClient {
 #[async_trait]
 impl StunClient for RealStunClient {
     async fn discover_external_addr(&self, socket: &UdpSocket) -> Result<SocketAddr, NatError> {
-        println!("STUN: Connecting to {}", self.stun_server);
+        log::debug!("STUN: Connecting to {}", self.stun_server);
 
         // Determine the socket's address family so we only contact a STUN
         // server address of the same family. Passing a hostname string directly
@@ -66,7 +66,7 @@ impl StunClient for RealStunClient {
                 ))
             })?;
 
-        println!("STUN: Resolved {} -> {}", self.stun_server, stun_addr);
+        log::debug!("STUN: Resolved {} -> {}", self.stun_server, stun_addr);
 
         let mut msg = Message::new();
         msg.set_type(BINDING_REQUEST);
@@ -75,12 +75,13 @@ impl StunClient for RealStunClient {
 
         // Try multiple times as UDP is unreliable
         for attempt in 1..=3 {
-            println!(
+            log::debug!(
                 "STUN: Sending request to {} (attempt {})...",
-                stun_addr, attempt
+                stun_addr,
+                attempt
             );
             if let Err(e) = socket.send_to(msg.raw.as_slice(), stun_addr).await {
-                println!("STUN: Send error: {}", e);
+                log::warn!("STUN: Send error: {}", e);
                 if attempt == 3 {
                     return Err(NatError::NetworkError(e.to_string()));
                 }
@@ -91,35 +92,35 @@ impl StunClient for RealStunClient {
             let mut buf = [0u8; 1024];
             match tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut buf)).await {
                 Ok(Ok((n, addr))) => {
-                    println!("STUN: Received {} bytes from {}", n, addr);
+                    log::debug!("STUN: Received {} bytes from {}", n, addr);
 
                     let mut response = Message::new();
                     response.raw = buf[..n].to_vec();
                     if let Err(e) = response.decode() {
-                        println!("STUN: Decode error: {}", e);
+                        log::warn!("STUN: Decode error: {}", e);
                         continue; // Try next attempt
                     }
 
                     let mut addr = stun::xoraddr::XorMappedAddress::default();
                     if addr.get_from(&response).is_ok() {
                         let external_addr = SocketAddr::new(addr.ip, addr.port);
-                        println!("STUN: Discovered XOR-Mapped Address: {}", external_addr);
+                        log::info!("STUN: Discovered XOR-Mapped Address: {}", external_addr);
                         return Ok(external_addr);
                     }
 
                     let mut addr = stun::addr::MappedAddress::default();
                     if addr.get_from(&response).is_ok() {
                         let external_addr = SocketAddr::new(addr.ip, addr.port);
-                        println!("STUN: Discovered Mapped Address: {}", external_addr);
+                        log::info!("STUN: Discovered Mapped Address: {}", external_addr);
                         return Ok(external_addr);
                     }
-                    println!("STUN: No address in response");
+                    log::warn!("STUN: No address in response");
                 }
                 Ok(Err(e)) => {
-                    println!("STUN: Recv error: {}", e);
+                    log::warn!("STUN: Recv error: {}", e);
                 }
                 Err(_) => {
-                    println!("STUN: Attempt {} timed out", attempt);
+                    log::warn!("STUN: Attempt {} timed out", attempt);
                 }
             }
             tokio::time::sleep(Duration::from_millis(500)).await;

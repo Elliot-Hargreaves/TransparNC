@@ -221,7 +221,7 @@ pub async fn gather_candidates(
             Ok(c) => candidates.push(c),
             Err(e) => {
                 // Log but don't fail — host candidates may still work on a LAN.
-                eprintln!("ICE: STUN candidate gathering failed: {e}");
+                log::warn!("ICE: STUN candidate gathering failed: {e}");
             }
         }
     }
@@ -319,7 +319,11 @@ pub async fn check_connectivity_with_config(
     let mut buf = [0u8; 64];
 
     for round in 0..config.max_attempts {
-        eprintln!("[ice] Starting probe round {}/{}", round + 1, config.max_attempts);
+        log::debug!(
+            "[ice] Starting probe round {}/{}",
+            round + 1,
+            config.max_attempts
+        );
         let deadline = tokio::time::Instant::now() + config.timeout;
 
         // Collect remote addresses so we can index into them without borrowing `pairs`.
@@ -343,28 +347,28 @@ pub async fn check_connectivity_with_config(
                         if let Ok((n, src)) = result {
                             let data = &buf[..n];
                             if is_probe(data) && !is_ack(data) {
-                                eprintln!("[ice] Received probe from {}", src);
+                                log::debug!("[ice] Received probe from {}", src);
                                 let _ = socket.send_to(&ack_pkt, src).await;
                             }
                             if is_ack(data) {
-                                eprintln!("[ice] Received ACK from {}", src);
+                                log::debug!("[ice] Received ACK from {}", src);
                                 if let Some(pair) = pairs.iter().find(|p| p.remote.addr == src) {
-                                    eprintln!(
+                                    log::info!(
                                         "[ice] Connectivity check succeeded: {} <-> {}",
                                         pair.local.addr, pair.remote.addr
                                     );
                                     return Ok(pair.clone());
                                 } else {
-                                    eprintln!("[ice] ACK from {} does not match any known candidate pair", src);
+                                    log::warn!("[ice] ACK from {} does not match any known candidate pair", src);
                                 }
                             }
                         }
                     }
                     result = socket.send_to(&probe_pkt, remote_addrs[send_idx]) => {
                         if let Err(e) = result {
-                            eprintln!("[ice] Probe send to {} failed: {e}", remote_addrs[send_idx]);
+                            log::warn!("[ice] Probe send to {} failed: {e}", remote_addrs[send_idx]);
                         } else {
-                             eprintln!("[ice] Sent probe to {}", remote_addrs[send_idx]);
+                            log::debug!("[ice] Sent probe to {}", remote_addrs[send_idx]);
                         }
                         send_idx += 1;
                     }
@@ -375,28 +379,32 @@ pub async fn check_connectivity_with_config(
                     Ok(Ok((n, src))) => {
                         let data = &buf[..n];
                         if is_probe(data) && !is_ack(data) {
-                            eprintln!("[ice] Received probe from {}", src);
+                            log::debug!("[ice] Received probe from {}", src);
                             let _ = socket.send_to(&ack_pkt, src).await;
                         }
                         if is_ack(data) {
-                            eprintln!("[ice] Received ACK from {}", src);
+                            log::debug!("[ice] Received ACK from {}", src);
                             if let Some(pair) = pairs.iter().find(|p| p.remote.addr == src) {
-                                eprintln!(
+                                log::info!(
                                     "[ice] Connectivity check succeeded: {} <-> {}",
-                                    pair.local.addr, pair.remote.addr
+                                    pair.local.addr,
+                                    pair.remote.addr
                                 );
                                 return Ok(pair.clone());
                             } else {
-                                eprintln!("[ice] ACK from {} does not match any known candidate pair", src);
+                                log::warn!(
+                                    "[ice] ACK from {} does not match any known candidate pair",
+                                    src
+                                );
                             }
                         }
                     }
                     Ok(Err(e)) => {
-                        eprintln!("[ice] Recv error during check: {e}");
+                        log::warn!("[ice] Recv error during check: {e}");
                     }
                     Err(_) => {
                         // Round deadline elapsed — move to next round.
-                        eprintln!("[ice] Probe round {} timed out", round + 1);
+                        log::debug!("[ice] Probe round {} timed out", round + 1);
                         break;
                     }
                 }
@@ -480,7 +488,12 @@ pub async fn establish_connectivity_own_socket(
     // VpnEngine's udp_to_tun loop that is already consuming the main socket.
     let ice_socket = match UdpSocket::bind("0.0.0.0:0").await {
         Ok(s) => s,
-        Err(e) => return (ConnectivityState::Failed, Err(IceError::NetworkError(e.to_string()))),
+        Err(e) => {
+            return (
+                ConnectivityState::Failed,
+                Err(IceError::NetworkError(e.to_string())),
+            );
+        }
     };
 
     establish_connectivity_with_local(&ice_socket, local_candidates, remote_candidates).await

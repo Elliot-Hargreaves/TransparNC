@@ -50,6 +50,7 @@ struct Cli {
 }
 
 fn main() -> anyhow::Result<()> {
+    env_logger::init();
     let cli = Cli::parse();
 
     if let Some(network) = cli.network {
@@ -58,7 +59,10 @@ fn main() -> anyhow::Result<()> {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?
-            .block_on(transpar_nc::daemon::run_headless(&network, &cli.signaling_server))
+            .block_on(transpar_nc::daemon::run_headless(
+                &network,
+                &cli.signaling_server,
+            ))
     } else if cli.daemon {
         // Daemon mode needs a tokio runtime for async networking.
         tokio::runtime::Builder::new_multi_thread()
