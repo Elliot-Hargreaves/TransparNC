@@ -180,7 +180,11 @@ impl DemoApp {
                 }
             }
             Message::SubmitNetworkDialog => {
-                let name = self.network_dialog.as_ref().map(|d| d.network_input.clone()).unwrap_or_default();
+                let name = self
+                    .network_dialog
+                    .as_ref()
+                    .map(|d| d.network_input.clone())
+                    .unwrap_or_default();
                 self.status_line = format!("Demo: Mock submitted network '{}'", name);
                 self.network_dialog = None;
             }
@@ -322,30 +326,32 @@ impl DemoApp {
             scrollable(items).height(Fill).into()
         };
 
-        container(container(content)
-            .height(Fill)
-            .width(Fill)
-            .padding(8)
-            .style(|theme: &Theme| {
-                let palette = theme.palette();
-                let mut background = palette.background;
-                background.r *= 0.8;
-                background.g *= 0.8;
-                background.b *= 0.8;
+        container(
+            container(content)
+                .height(Fill)
+                .width(Fill)
+                .padding(8)
+                .style(|theme: &Theme| {
+                    let palette = theme.palette();
+                    let mut background = palette.background;
+                    background.r *= 0.8;
+                    background.g *= 0.8;
+                    background.b *= 0.8;
 
-                container::Style {
-                    background: Some(background.into()),
-                    border: iced::Border {
-                        radius: 10.0.into(),
+                    container::Style {
+                        background: Some(background.into()),
+                        border: iced::Border {
+                            radius: 10.0.into(),
+                            ..Default::default()
+                        },
                         ..Default::default()
-                    },
-                    ..Default::default()
-                }
-            }))
-            .padding(10)
-            .height(Fill)
-            .width(Fill)
-            .into()
+                    }
+                }),
+        )
+        .padding(10)
+        .height(Fill)
+        .width(Fill)
+        .into()
     }
 
     fn network_dialog_view(&self, dialog: &NetworkDialog) -> Element<'_, Message> {

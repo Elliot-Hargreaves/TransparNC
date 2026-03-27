@@ -448,7 +448,6 @@ pub async fn establish_connectivity(
 mod tests {
     use super::*;
     use crate::net::nat::MockStunClient;
-    use std::net::{Ipv4Addr, SocketAddrV4};
 
     /// Verifies that host candidate gathering produces at least one candidate
     /// on any machine with a non-loopback interface.

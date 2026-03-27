@@ -1,2 +1,1 @@
-/// Core VPN logic and state management.
-pub mod state;
+//! Core VPN logic and state management.

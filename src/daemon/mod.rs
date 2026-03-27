@@ -370,7 +370,10 @@ async fn connect_to_signaling(
 
                         let (assigned_ip, tun_device) = match TunDevice::new(config) {
                             Ok(tun) => {
-                                eprintln!("[daemon] Successfully created TUN device with IP {}", ip_str);
+                                eprintln!(
+                                    "[daemon] Successfully created TUN device with IP {}",
+                                    ip_str
+                                );
                                 (Some(ip_str), Some(tun))
                             }
                             Err(e) => {
@@ -392,9 +395,7 @@ async fn connect_to_signaling(
                                 })
                                 .collect();
                             let mut st = state.lock().await;
-                            st.status = ConnectionStatus::Connected {
-                                virtual_ip: ip,
-                            };
+                            st.status = ConnectionStatus::Connected { virtual_ip: ip };
                             st.peers = ipc_peers.clone();
                             st.tun = Some(tun);
                             let _ = event_tx.send(DaemonEvent::StatusUpdate {
@@ -402,7 +403,10 @@ async fn connect_to_signaling(
                             });
                             let _ = event_tx.send(DaemonEvent::PeerUpdate { peers: ipc_peers });
                         } else {
-                            eprintln!("[daemon] Could not find an available subnet for IP index {}", assigned_index);
+                            eprintln!(
+                                "[daemon] Could not find an available subnet for IP index {}",
+                                assigned_index
+                            );
                             let mut st = state.lock().await;
                             st.status = ConnectionStatus::Disconnected;
                             let _ = event_tx.send(DaemonEvent::StatusUpdate {
