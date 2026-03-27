@@ -13,7 +13,19 @@ shadow_rs::shadow!(build);
 #[derive(Parser, Debug)]
 #[command(
     name = "transparnc",
-    version = &*Box::leak(format!("{} ({} {})", env!("CARGO_PKG_VERSION"), &build::SHORT_COMMIT[..7], build::BUILD_TIME_2822).into_boxed_str()),
+    version = &*Box::leak(
+        format!(
+            "{} ({}, {})",
+            env!("CARGO_PKG_VERSION"),
+            if build::SHORT_COMMIT.is_empty() {
+                "no-git"
+            } else {
+                &build::SHORT_COMMIT[..build::SHORT_COMMIT.len().min(7)]
+            },
+            build::BUILD_TIME_2822
+        )
+        .into_boxed_str()
+    ),
     about
 )]
 struct Cli {
