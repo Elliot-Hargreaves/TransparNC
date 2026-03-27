@@ -464,6 +464,28 @@ pub async fn establish_connectivity_with_local(
     }
 }
 
+/// Like [`establish_connectivity_with_local`] but binds its own ephemeral UDP
+/// socket for ICE probing instead of sharing the caller's socket.
+///
+/// This avoids a race condition where the VpnEngine's `udp_to_tun` loop
+/// consumes incoming ACK packets before the ICE connectivity check can see
+/// them, causing every probe round to time out.  After ICE succeeds the
+/// selected pair's remote address is returned so the caller can hand it to
+/// the VpnEngine's data-plane socket.
+pub async fn establish_connectivity_own_socket(
+    local_candidates: Vec<Candidate>,
+    remote_candidates: Vec<Candidate>,
+) -> (ConnectivityState, Result<CandidatePair, IceError>) {
+    // Bind a dedicated ephemeral socket so ICE probes do not race with the
+    // VpnEngine's udp_to_tun loop that is already consuming the main socket.
+    let ice_socket = match UdpSocket::bind("0.0.0.0:0").await {
+        Ok(s) => s,
+        Err(e) => return (ConnectivityState::Failed, Err(IceError::NetworkError(e.to_string()))),
+    };
+
+    establish_connectivity_with_local(&ice_socket, local_candidates, remote_candidates).await
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

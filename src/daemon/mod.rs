@@ -463,12 +463,14 @@ async fn connect_to_signaling(
                                 SignalingMessage::Signal { from, data, .. } => {
                                     eprintln!("[daemon] Signal from {:?}", from);
                                     if let Ok(ex) = serde_json::from_str::<CandidateExchange>(&data) {
-                                        let udp_c = udp.clone();
                                         let st_c = state.clone();
                                         let priv_c = static_private.clone();
                                         let local_c = local_candidates.clone();
                                         tokio::spawn(async move {
-                                            let (conn_state, result) = crate::net::ice::establish_connectivity_with_local(&udp_c, local_c, ex.candidates).await;
+                                            // Use a dedicated ephemeral socket for ICE probing so
+                                            // the VpnEngine's udp_to_tun loop cannot consume the
+                                            // ACK packets before the connectivity check sees them.
+                                            let (conn_state, result) = crate::net::ice::establish_connectivity_own_socket(local_c, ex.candidates).await;
                                             if let Ok(selected) = result {
                                                 eprintln!("[daemon] ICE success with {:?}", from);
                                                 let (pm, wp) = { let st = st_c.lock().await; (st.engine_peer_manager.clone(), st.engine_wg_peers.clone()) };
