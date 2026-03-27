@@ -401,7 +401,9 @@ impl App {
                     )
                     .size(16),
                     Space::new().height(20),
-                    button(text("OK — Start Daemon")).on_press(Message::UserAcceptedDaemonStart),
+                    button(text("OK — Start Daemon"))
+                        .on_press(Message::UserAcceptedDaemonStart)
+                        .style(button::secondary),
                 ]
                 .align_x(iced::Alignment::Center);
                 center(prompt).into()
@@ -450,18 +452,45 @@ impl App {
             // While a dialog is open the bottom bar only shows Cancel.
             row![
                 Space::new().width(Fill),
-                button(text("Cancel")).on_press(Message::CloseNetworkDialog),
+                button(text("Cancel").size(14))
+                    .padding(6)
+                    .on_press(Message::CloseNetworkDialog)
+                    .style(button::secondary),
             ]
             .padding(10)
         } else {
             row![
-                button(text("Join Network")).on_press(Message::OpenJoinDialog),
+                button(text("Join Network").size(14))
+                    .padding(6)
+                    .on_press(Message::OpenJoinDialog)
+                    .style(button::secondary),
                 Space::new().width(8),
-                button(text("Create Network")).on_press(Message::OpenCreateDialog),
+                button(text("Create Network").size(14))
+                    .padding(6)
+                    .on_press(Message::OpenCreateDialog)
+                    .style(button::secondary),
                 Space::new().width(Fill),
-                button(text("Shutdown Daemon"))
+                button(text("Shutdown Daemon").size(14))
+                    .padding(6)
                     .on_press(Message::ShutdownDaemon)
-                    .style(button::danger),
+                    .style(|theme: &Theme, status| {
+                        let palette = theme.palette();
+                        let mut style = button::secondary(theme, status);
+                        match status {
+                            button::Status::Active | button::Status::Pressed => {
+                                style.border.color = palette.danger;
+                                style.border.width = 1.0;
+                                style.background = None;
+                                style.text_color = palette.danger;
+                            }
+                            button::Status::Hovered => {
+                                style.background = Some(palette.danger.into());
+                                style.text_color = palette.background.into();
+                            }
+                            _ => {}
+                        }
+                        style
+                    }),
             ]
             .padding(10)
         };
@@ -471,7 +500,7 @@ impl App {
 
     /// Renders the peer list (default body when no dialog is open).
     fn peer_list_view(&self) -> Element<'_, Message> {
-        if self.peers.is_empty() {
+        let content: Element<'_, Message> = if self.peers.is_empty() {
             center(text("No peers connected.").size(14)).into()
         } else {
             let items = self
@@ -491,7 +520,32 @@ impl App {
                     )
                 });
             scrollable(items).height(Fill).into()
-        }
+        };
+
+        container(container(content)
+            .height(Fill)
+            .width(Fill)
+            .padding(8)
+            .style(|theme: &Theme| {
+                let palette = theme.palette();
+                let mut background = palette.background;
+                background.r *= 0.8;
+                background.g *= 0.8;
+                background.b *= 0.8;
+
+                container::Style {
+                    background: Some(background.into()),
+                    border: iced::Border {
+                        radius: 10.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            }))
+            .padding(10)
+            .height(Fill)
+            .width(Fill)
+            .into()
     }
 
     /// Renders the join / create network dialog form.
@@ -515,7 +569,8 @@ impl App {
                 "Use default server ({}:{})",
                 DEFAULT_SIGNALING_HOST, DEFAULT_SIGNALING_PORT
             ))
-            .on_toggle(Message::UseDefaultServerToggled);
+            .on_toggle(Message::UseDefaultServerToggled)
+            .style(checkbox::secondary);
 
         let mut form = column![
             text(title).size(22),
@@ -557,7 +612,7 @@ impl App {
             Space::new().width(Fill),
             button(text(submit_label))
                 .on_press(Message::SubmitNetworkDialog)
-                .style(button::primary),
+                .style(button::secondary),
         ]);
 
         container(form).width(Fill).height(Fill).padding(8).into()
@@ -672,6 +727,7 @@ pub fn run(socket_path: &str) -> iced::Result {
     iced::application(move || App::new(socket.clone()), App::update, App::view)
         .title("TransparNC")
         .theme(App::theme)
-        .window_size((600.0, 450.0))
+        .window_size((470.0, 450.0))
+        .resizable(false)
         .run()
 }
