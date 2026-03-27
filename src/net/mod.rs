@@ -34,14 +34,29 @@ pub struct VpnEngine {
     /// WireGuard tunnel instances for each peer (indexed by endpoint).
     wg_peers: Arc<Mutex<Vec<WireGuardPeer>>>,
     /// Tracks peer connection state, heartbeats, and lifecycle transitions.
-    peer_manager: Arc<Mutex<PeerManager>>,
+    pub peer_manager: Arc<Mutex<PeerManager>>,
     /// The UDP socket used for sending/receiving encrypted WireGuard packets.
-    udp: Arc<UdpSocket>,
+    pub udp: Arc<UdpSocket>,
     /// Optional STUN client for NAT discovery.
     stun_client: Option<Box<dyn StunClient>>,
 }
 
 impl VpnEngine {
+    /// Creates a new VPN engine using an already bound UDP socket.
+    pub fn with_socket(
+        tun: TunDevice,
+        udp: Arc<UdpSocket>,
+        stun_client: Option<Box<dyn StunClient>>,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            tun,
+            wg_peers: Arc::new(Mutex::new(Vec::new())),
+            peer_manager: Arc::new(Mutex::new(PeerManager::new())),
+            udp,
+            stun_client,
+        })
+    }
+
     /// Creates a new VPN engine.
     ///
     /// Binds a UDP socket on the given port and initialises an empty
@@ -73,6 +88,11 @@ impl VpnEngine {
     /// or query active connections.
     pub fn peer_manager(&self) -> Arc<Mutex<PeerManager>> {
         self.peer_manager.clone()
+    }
+
+    /// Returns a shared reference to the WireGuard peers list.
+    pub fn wg_peers(&self) -> Arc<Mutex<Vec<WireGuardPeer>>> {
+        self.wg_peers.clone()
     }
 
     /// Runs the main packet processing loop.
@@ -108,6 +128,12 @@ impl VpnEngine {
                     match tun_reader.read(&mut buf).await {
                         Ok(0) => break,
                         Ok(n) => {
+                            let dest_ip = if n >= 20 {
+                                format!("{}.{}.{}.{}", buf[16], buf[17], buf[18], buf[19])
+                            } else {
+                                "unknown".to_string()
+                            };
+                            eprintln!("[vpn] Captured {} bytes from TUN. Dest IP: {}", n, dest_ip);
                             let mut peers = wg_peers.lock().await;
                             // For simplicity, we send to the first peer with an endpoint.
                             // In a real P2P VPN, we'd look up the peer by destination IP.
