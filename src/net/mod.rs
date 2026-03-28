@@ -291,11 +291,20 @@ impl VpnEngine {
                             let _ = udp.send_to(packet, addr).await;
                             // Check once for a data packet queued behind the handshake —
                             // do NOT loop, to avoid triggering timer-driven handshakes.
+                            // The queued packet was an outbound data packet buffered before
+                            // the session existed; after encryption it returns WriteToNetwork
+                            // (not WriteToTunnel), so we must send it over UDP.
                             let mut out2 = [0u8; 65535];
                             match peer.decapsulate(&[], &mut out2) {
                                 TunnResult::WriteToTunnelV4(p, _) | TunnResult::WriteToTunnelV6(p, _) => {
                                     let mut writer = tun_writer.lock().await;
                                     let _ = writer.write_all(p).await;
+                                }
+                                TunnResult::WriteToNetwork(queued) => {
+                                    // The queued outbound data packet is now encrypted — send it.
+                                    if let Some(endpoint) = peer.endpoint() {
+                                        let _ = udp.send_to(queued, endpoint).await;
+                                    }
                                 }
                                 _ => {}
                             }
