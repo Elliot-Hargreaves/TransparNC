@@ -72,7 +72,7 @@ pub async fn run(socket_path: &str) -> anyhow::Result<()> {
     }
 
     let listener = UnixListener::bind(socket_path)?;
-    log::info!("[daemon] Listening on {}", socket_path);
+    eprintln!("[daemon] Listening on {}", socket_path);
 
     // Make the socket world-accessible so the unprivileged GUI can connect.
     #[cfg(unix)]
@@ -107,7 +107,7 @@ pub async fn run(socket_path: &str) -> anyhow::Result<()> {
 
     // Cleanup the socket file on exit.
     let _ = std::fs::remove_file(socket_path);
-    log::info!("[daemon] Shut down cleanly.");
+    eprintln!("[daemon] Shut down cleanly.");
     Ok(())
 }
 
@@ -190,7 +190,7 @@ async fn handle_command(
             .await;
         }
         DaemonCommand::Connect { network_id } => {
-            log::info!("[daemon] Connect requested for network: {}", network_id);
+            eprintln!("[daemon] Connect requested for network: {}", network_id);
             let mut st = state.lock().await;
             st.status = ConnectionStatus::Connecting;
             let _ = event_tx.send(DaemonEvent::StatusUpdate {
@@ -205,7 +205,7 @@ async fn handle_command(
             });
         }
         DaemonCommand::Disconnect => {
-            log::info!("[daemon] Disconnect requested.");
+            eprintln!("[daemon] Disconnect requested.");
             let mut st = state.lock().await;
             st.status = ConnectionStatus::Disconnected;
             st.peers.clear();
@@ -214,7 +214,7 @@ async fn handle_command(
             });
         }
         DaemonCommand::Shutdown => {
-            log::info!("[daemon] Shutdown requested — tearing down TUN devices.");
+            eprintln!("[daemon] Shutdown requested — tearing down TUN devices.");
             let _ = write_message(writer, &DaemonEvent::ShuttingDown).await;
             let _ = event_tx.send(DaemonEvent::ShuttingDown);
             // Signal the accept loop to exit.
@@ -224,7 +224,7 @@ async fn handle_command(
             network_id,
             signaling_server,
         } => {
-            log::info!(
+            eprintln!(
                 "[daemon] Join network '{}' via signaling server '{}'",
                 network_id, signaling_server
             );
@@ -249,7 +249,7 @@ async fn handle_command(
             network_name,
             signaling_server,
         } => {
-            log::info!(
+            eprintln!(
                 "[daemon] Create network '{}' via signaling server '{}'",
                 network_name, signaling_server
             );
@@ -261,7 +261,7 @@ async fn handle_command(
             drop(st);
 
             let net_uuid = name_to_uuid(&network_name);
-            log::debug!(
+            eprintln!(
                 "[daemon] Network '{}' mapped to UUID {}",
                 network_name, net_uuid
             );
@@ -283,13 +283,13 @@ async fn handle_command(
 /// The codepath through `connect_to_signaling` is identical to what the daemon
 /// executes when it receives a `JoinNetwork` command from the GUI.
 pub async fn run_headless(network: &str, signaling_server: &str) -> anyhow::Result<()> {
-    log::info!(
+    eprintln!(
         "[headless] Joining network '{}' via '{}'",
         network, signaling_server
     );
 
     let net_uuid = Uuid::parse_str(network).unwrap_or_else(|_| name_to_uuid(network));
-    log::debug!("[headless] Resolved network UUID: {}", net_uuid);
+    eprintln!("[headless] Resolved network UUID: {}", net_uuid);
 
     let state = Arc::new(Mutex::new(DaemonState::new()));
     let (event_tx, mut event_rx) = broadcast::channel::<DaemonEvent>(64);
@@ -320,10 +320,10 @@ pub async fn run_headless(network: &str, signaling_server: &str) -> anyhow::Resu
     loop {
         tokio::select! {
             Ok(event) = event_rx.recv() => {
-                log::debug!("[headless] Event: {:?}", event);
+                eprintln!("[headless] Event: {:?}", event);
             }
             _ = tokio::signal::ctrl_c() => {
-                log::info!("[headless] Shutting down.");
+                eprintln!("[headless] Shutting down.");
                 break;
             }
         }
@@ -357,13 +357,13 @@ async fn gather_candidates_for_socket(
     let candidates = match crate::net::ice::gather_candidates(Some(&stun_client), socket).await {
         Ok(c) => c,
         Err(e) => {
-            log::warn!("[daemon] Candidate gathering failed: {}", e);
+            eprintln!("[daemon] Candidate gathering failed: {}", e);
             let port = socket.local_addr().map(|a| a.port()).unwrap_or(0);
             crate::net::ice::gather_host_candidates(port)
         }
     };
     for c in &candidates {
-        log::debug!(
+        eprintln!(
             "[daemon] Gathered local candidate: {:?} ({})",
             c.candidate_type, c.addr
         );
@@ -389,15 +389,15 @@ async fn connect_to_signaling(
     event_tx: &broadcast::Sender<DaemonEvent>,
 ) {
     let url = format!("ws://{}/ws", signaling_server);
-    log::info!("[daemon] Connecting to signaling server at {}", url);
+    eprintln!("[daemon] Connecting to signaling server at {}", url);
 
     let ws_stream = match tokio_tungstenite::connect_async(&url).await {
         Ok((stream, _)) => {
-            log::info!("[daemon] WebSocket connection established to {}", url);
+            eprintln!("[daemon] WebSocket connection established to {}", url);
             stream
         }
         Err(e) => {
-            log::error!("[daemon] Failed to connect to signaling server: {}", e);
+            eprintln!("[daemon] Failed to connect to signaling server: {}", e);
             let mut st = state.lock().await;
             st.status = ConnectionStatus::Disconnected;
             let _ = event_tx.send(DaemonEvent::StatusUpdate {
@@ -433,13 +433,13 @@ async fn connect_to_signaling(
         public_key,
     };
     let join_json = serde_json::to_string(&join_msg).unwrap();
-    log::debug!("[daemon] Sending Join: {}", join_json);
+    eprintln!("[daemon] Sending Join: {}", join_json);
 
     if let Err(e) = ws_writer
         .send(tungstenite::Message::Text(join_json.into()))
         .await
     {
-        log::error!("[daemon] Failed to send Join: {}", e);
+        eprintln!("[daemon] Failed to send Join: {}", e);
         let mut st = state.lock().await;
         st.status = ConnectionStatus::Disconnected;
         let _ = event_tx.send(DaemonEvent::StatusUpdate {
@@ -472,11 +472,11 @@ async fn connect_to_signaling(
                 };
                 match msg {
                     tungstenite::Message::Text(text) => {
-                        log::debug!("[daemon] Received signal: {}", text);
+                        eprintln!("[daemon] Received signal: {}", text);
                         if let Ok(sig_msg) = serde_json::from_str::<SignalingMessage>(&text) {
                             match sig_msg {
                                 SignalingMessage::Joined { peers, assigned_index } => {
-                                    log::info!("[daemon] Joined network. Index: {}", assigned_index);
+                                    eprintln!("[daemon] Joined network. Index: {}", assigned_index);
                                     let ip_str = format!("192.168.22.{}", assigned_index);
                                     let ip = ip_str.parse::<std::net::Ipv4Addr>().unwrap();
                                     let config = TunConfig {
@@ -487,7 +487,7 @@ async fn connect_to_signaling(
                                     };
                                     match TunDevice::new(config) {
                                         Ok(tun) => {
-                                            log::info!("[daemon] Successfully created TUN device with IP {}", ip_str);
+                                            eprintln!("[daemon] Successfully created TUN device with IP {}", ip_str);
                                             let (tun_dispatcher, tun_writer) = split_tun(tun);
                                             let peer_manager = Arc::new(Mutex::new(PeerManager::new()));
                                             let ipc_peers: Vec<IpcPeerInfo> = peers.iter().map(|p| IpcPeerInfo {
@@ -524,12 +524,12 @@ async fn connect_to_signaling(
                                             }
                                         }
                                         Err(e) => {
-                                            log::error!("[daemon] Failed to create TUN device: {}", e);
+                                            eprintln!("[daemon] Failed to create TUN device: {}", e);
                                         }
                                     }
                                 }
                                 SignalingMessage::PeerJoined { peer: p } => {
-                                    log::info!("[daemon] New peer: {:?}", p.peer_id);
+                                    eprintln!("[daemon] New peer: {:?}", p.peer_id);
                                     let (pm, connected) = {
                                         let st = state.lock().await;
                                         (st.peer_manager.clone(), matches!(st.status, ConnectionStatus::Connected { .. }))
@@ -560,7 +560,7 @@ async fn connect_to_signaling(
                                     let _ = event_tx.send(DaemonEvent::PeerUpdate { peers: st.peers.clone() });
                                 }
                                 SignalingMessage::PeerLeft { peer_id: p_id } => {
-                                    log::info!("[daemon] Peer left: {:?}", p_id);
+                                    eprintln!("[daemon] Peer left: {:?}", p_id);
                                     let mut st = state.lock().await;
                                     // Resolve virtual_index before removing the peer so we can
                                     // shut down its VpnEngine and stop stale handshake attempts.
@@ -578,7 +578,7 @@ async fn connect_to_signaling(
                                     let _ = event_tx.send(DaemonEvent::PeerUpdate { peers: st.peers.clone() });
                                 }
                                 SignalingMessage::Signal { from, data, .. } => {
-                                    log::debug!("[daemon] Signal from {:?}", from);
+                                    eprintln!("[daemon] Signal from {:?}", from);
                                     if let Ok(ex) = serde_json::from_str::<CandidateExchange>(&data) {
                                         if ex.candidates.is_empty() {
                                             // Trigger signal — the remote peer is telling us to
@@ -595,13 +595,13 @@ async fn connect_to_signaling(
                                                 let ice_socket = match UdpSocket::bind("0.0.0.0:0").await {
                                                     Ok(s) => Arc::new(s),
                                                     Err(e) => {
-                                                        log::error!("[daemon] Failed to bind trigger socket for {:?}: {}", from, e);
+                                                        eprintln!("[daemon] Failed to bind trigger socket for {:?}: {}", from, e);
                                                         return;
                                                     }
                                                 };
                                                 let (local_candidates, candidates_json) =
                                                     gather_candidates_for_socket(&ice_socket, &stun_server_c).await;
-                                                log::debug!(
+                                                eprintln!(
                                                     "[daemon] Trigger signal from {:?}: sending candidates (port {}), awaiting real candidates to start ICE.",
                                                     from,
                                                     ice_socket.local_addr().map(|a| a.port()).unwrap_or(0)
@@ -634,7 +634,7 @@ async fn connect_to_signaling(
                                                             let _ = mgr.update_state(&from, PeerConnectionState::Negotiating);
                                                             (true, ice_state)
                                                         } else {
-                                                            log::warn!(
+                                                            eprintln!(
                                                                 "[daemon] Ignoring duplicate Signal from {:?} (state: {})",
                                                                 from, entry.state
                                                             );
@@ -683,7 +683,7 @@ async fn connect_to_signaling(
             }
         }
     }
-    log::info!("[daemon] Disconnected from signaling server");
+    eprintln!("[daemon] Disconnected from signaling server");
     let mut st = state.lock().await;
     st.status = ConnectionStatus::Disconnected;
     st.peers.clear();
@@ -718,7 +718,7 @@ async fn handle_peer_signal(
     //    If not available (initiating side), bind a fresh socket and run STUN.
     let (ice_socket, local_candidates) = match existing_ice_state {
         Some((sock, candidates)) => {
-            log::debug!(
+            eprintln!(
                 "[daemon] Reusing trigger-phase socket (port {}) for ICE with {:?}",
                 sock.local_addr().map(|a| a.port()).unwrap_or(0),
                 from
@@ -729,7 +729,7 @@ async fn handle_peer_signal(
             let sock = match UdpSocket::bind("0.0.0.0:0").await {
                 Ok(s) => Arc::new(s),
                 Err(e) => {
-                    log::error!(
+                    eprintln!(
                         "[daemon] Failed to bind per-peer socket for {:?}: {}",
                         from, e
                     );
@@ -738,7 +738,7 @@ async fn handle_peer_signal(
             };
             let (candidates, candidates_json) =
                 gather_candidates_for_socket(&sock, &stun_server).await;
-            log::debug!(
+            eprintln!(
                 "[daemon] Sending per-peer candidates to {:?} (socket port {})",
                 from,
                 sock.local_addr().map(|a| a.port()).unwrap_or(0)
@@ -750,9 +750,9 @@ async fn handle_peer_signal(
 
     // 2. Run ICE on the socket whose port was already advertised to the remote peer.
     //    remote_candidates are real (non-zero port) at this point.
-    log::info!("[daemon] Starting ICE connectivity check with {:?}", from);
+    eprintln!("[daemon] Starting ICE connectivity check with {:?}", from);
     for c in &remote_candidates {
-        log::debug!(
+        eprintln!(
             "[daemon]   Remote candidate: {:?} @ {}",
             c.candidate_type, c.addr
         );
@@ -767,7 +767,7 @@ async fn handle_peer_signal(
 
     match result {
         Ok(selected) => {
-            log::info!(
+            eprintln!(
                 "[daemon] ICE success with {:?}: selected {}",
                 from, selected.remote.addr
             );
@@ -795,7 +795,7 @@ async fn handle_peer_signal(
             let (tun_dispatcher, tun_writer) = match (tun_dispatcher, tun_writer) {
                 (Some(d), Some(w)) => (d, w),
                 _ => {
-                    log::error!("[daemon] TUN not ready for peer {:?}", from);
+                    eprintln!("[daemon] TUN not ready for peer {:?}", from);
                     return;
                 }
             };
@@ -803,20 +803,20 @@ async fn handle_peer_signal(
             let pm = match pm {
                 Some(p) => p,
                 None => {
-                    log::error!("[daemon] Peer manager not ready for {:?}", from);
+                    eprintln!("[daemon] Peer manager not ready for {:?}", from);
                     return;
                 }
             };
 
             if peer_public_key.is_empty() || virtual_index == 0 {
-                log::error!("[daemon] Missing peer info for {:?}", from);
+                eprintln!("[daemon] Missing peer info for {:?}", from);
                 return;
             }
 
             let key_bytes = match hex::decode(&peer_public_key) {
                 Ok(b) if b.len() == 32 => b,
                 _ => {
-                    log::error!("[daemon] Invalid public key for {:?}", from);
+                    eprintln!("[daemon] Invalid public key for {:?}", from);
                     return;
                 }
             };
@@ -834,7 +834,7 @@ async fn handle_peer_signal(
             ) {
                 Ok(p) => p,
                 Err(e) => {
-                    log::error!(
+                    eprintln!(
                         "[daemon] Failed to create WireGuard peer for {:?}: {:?}",
                         from, e
                     );
@@ -882,12 +882,12 @@ async fn handle_peer_signal(
             );
             tokio::spawn(async move {
                 if let Err(e) = engine.run(shutdown_rx).await {
-                    log::error!("[daemon] VpnEngine error for {:?}: {}", from, e);
+                    eprintln!("[daemon] VpnEngine error for {:?}: {}", from, e);
                 }
             });
         }
         Err(e) => {
-            log::error!(
+            eprintln!(
                 "[daemon] ICE failed for {:?}: {:?} ({:?})",
                 from, conn_state, e
             );
