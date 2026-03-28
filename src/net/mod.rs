@@ -113,8 +113,15 @@ async fn run_tun_dispatcher(
                         // Too short to be a valid IPv4 packet; skip silently.
                     }
                     Ok(n) => {
-                        // Route by destination IP last octet (192.168.22.<index>).
-                        let dest_index = buf[19];
+                        // Route by IP version and destination address last octet.
+                        // IPv4: version nibble = 4, dest addr at bytes 16–19.
+                        // IPv6: version nibble = 6, dest addr at bytes 24–39.
+                        let version = buf[0] >> 4;
+                        let dest_index = if version == 6 && n >= 40 {
+                            buf[39]
+                        } else {
+                            buf[19]
+                        };
                         if let Some(tx) = peers.get(&dest_index) {
                             let packet = buf[..n].to_vec();
                             if tx.send(packet).await.is_err() {
@@ -219,44 +226,64 @@ impl VpnEngine {
                         virtual_index
                     );
 
-                    let mut peer = wg_peer.lock().await;
-                    match peer.encapsulate(&buf[..n], &mut out) {
-                        TunnResult::WriteToNetwork(packet) => {
-                            if let Some(endpoint) = peer.endpoint() {
-                                match udp.send_to(packet, endpoint).await {
-                                    Ok(_) => {
-                                        log::debug!(
-                                            "[vpn] Sent {} encrypted bytes to {} ({})",
-                                            packet.len(),
-                                            dest_ip,
-                                            endpoint
-                                        );
-                                    }
-                                    Err(e) => {
-                                        log::warn!(
-                                            "[vpn] Failed to send UDP to {}: {}",
-                                            endpoint,
-                                            e
-                                        );
-                                    }
-                                }
-                            } else {
-                                log::warn!("[vpn] No endpoint for peer {}", dest_ip);
-                                continue;
+                    // Encapsulate outside the lock so we only hold the mutex
+                    // for the CPU-bound crypto work, not across async send_to calls.
+                    let encap_result = {
+                        let mut peer = wg_peer.lock().await;
+                        // encapsulate writes into `out`; the returned slice borrows `out`
+                        // so we must copy it out before releasing the lock.
+                        match peer.encapsulate(&buf[..n], &mut out) {
+                            TunnResult::WriteToNetwork(packet) => {
+                                Some((packet.to_vec(), peer.endpoint()))
                             }
-                            // Flush the single queued data packet — call exactly once,
-                            // do NOT loop, to avoid triggering timer-driven handshakes.
+                            TunnResult::Err(e) => {
+                                log::warn!("[vpn] WG encapsulation error for {}: {:?}", dest_ip, e);
+                                None
+                            }
+                            _ => None,
+                        }
+                    };
+                    if let Some((packet, endpoint_opt)) = encap_result {
+                        if let Some(endpoint) = endpoint_opt {
+                            match udp.send_to(&packet, endpoint).await {
+                                Ok(_) => {
+                                    log::debug!(
+                                        "[vpn] Sent {} encrypted bytes to {} ({})",
+                                        packet.len(),
+                                        dest_ip,
+                                        endpoint
+                                    );
+                                }
+                                Err(e) => {
+                                    log::warn!(
+                                        "[vpn] Failed to send UDP to {}: {}",
+                                        endpoint,
+                                        e
+                                    );
+                                }
+                            }
+                        } else {
+                            log::warn!("[vpn] No endpoint for peer {}", dest_ip);
+                            continue;
+                        }
+                        // Drain all packets queued behind the handshake. boringtun
+                        // may have buffered multiple data packets while waiting for
+                        // the session to be established; we must flush them all or
+                        // they are silently dropped (UDP has no retransmission).
+                        loop {
                             let mut out2 = [0u8; 65535];
-                            if let TunnResult::WriteToNetwork(queued) = peer.encapsulate(&[], &mut out2) {
-                                if let Some(endpoint) = peer.endpoint() {
-                                    let _ = udp.send_to(queued, endpoint).await;
+                            let queued = {
+                                let mut peer = wg_peer.lock().await;
+                                match peer.encapsulate(&[], &mut out2) {
+                                    TunnResult::WriteToNetwork(q) => Some((q.to_vec(), peer.endpoint())),
+                                    _ => None,
                                 }
+                            };
+                            match queued {
+                                Some((q, Some(ep))) => { let _ = udp.send_to(&q, ep).await; }
+                                _ => break,
                             }
                         }
-                        TunnResult::Err(e) => {
-                            log::warn!("[vpn] WG encapsulation error for {}: {:?}", dest_ip, e);
-                        }
-                        _ => {}
                     }
                 }
             })
@@ -271,48 +298,70 @@ impl VpnEngine {
                 let mut buf = [0u8; 65535];
                 let mut out = [0u8; 65535];
                 while let Ok((n, addr)) = udp.recv_from(&mut buf).await {
-                    let mut peer = wg_peer.lock().await;
-                    match peer.decapsulate(&buf[..n], &mut out) {
-                        TunnResult::WriteToTunnelV4(packet, _)
-                        | TunnResult::WriteToTunnelV6(packet, _) => {
+                    // Decapsulate outside the lock to avoid holding the mutex
+                    // across async TUN-write and UDP-send calls.
+                    enum DecapAction {
+                        WriteTunnel(Vec<u8>),
+                        SendNetwork(Vec<u8>),
+                        Error,
+                        Nothing,
+                    }
+                    let action = {
+                        let mut peer = wg_peer.lock().await;
+                        match peer.decapsulate(&buf[..n], &mut out) {
+                            TunnResult::WriteToTunnelV4(p, _) | TunnResult::WriteToTunnelV6(p, _) => {
+                                DecapAction::WriteTunnel(p.to_vec())
+                            }
+                            TunnResult::WriteToNetwork(p) => DecapAction::SendNetwork(p.to_vec()),
+                            TunnResult::Err(e) => {
+                                log::warn!("[vpn] WG decapsulation error from {}: {:?}", addr, e);
+                                DecapAction::Error
+                            }
+                            _ => DecapAction::Nothing,
+                        }
+                    };
+                    match action {
+                        DecapAction::WriteTunnel(packet) => {
                             let mut writer = tun_writer.lock().await;
-                            if let Err(e) = writer.write_all(packet).await {
+                            if let Err(e) = writer.write_all(&packet).await {
                                 log::warn!("[vpn] TUN write error: {}", e);
                             } else {
-                                log::debug!(
-                                    "[vpn] Wrote {} bytes to TUN from {}",
-                                    packet.len(),
-                                    addr
-                                );
+                                log::debug!("[vpn] Wrote {} bytes to TUN from {}", packet.len(), addr);
                             }
                         }
-                        TunnResult::WriteToNetwork(packet) => {
+                        DecapAction::SendNetwork(packet) => {
                             // WireGuard handshake response — send it back.
-                            let _ = udp.send_to(packet, addr).await;
-                            // Check once for a data packet queued behind the handshake —
-                            // do NOT loop, to avoid triggering timer-driven handshakes.
-                            // The queued packet was an outbound data packet buffered before
-                            // the session existed; after encryption it returns WriteToNetwork
-                            // (not WriteToTunnel), so we must send it over UDP.
-                            let mut out2 = [0u8; 65535];
-                            match peer.decapsulate(&[], &mut out2) {
-                                TunnResult::WriteToTunnelV4(p, _) | TunnResult::WriteToTunnelV6(p, _) => {
-                                    let mut writer = tun_writer.lock().await;
-                                    let _ = writer.write_all(p).await;
-                                }
-                                TunnResult::WriteToNetwork(queued) => {
-                                    // The queued outbound data packet is now encrypted — send it.
-                                    if let Some(endpoint) = peer.endpoint() {
-                                        let _ = udp.send_to(queued, endpoint).await;
+                            let _ = udp.send_to(&packet, addr).await;
+                            // Drain all packets queued behind the handshake. boringtun
+                            // may have buffered multiple data packets; flush them all.
+                            loop {
+                                let mut out2 = [0u8; 65535];
+                                let queued_action = {
+                                    let mut peer = wg_peer.lock().await;
+                                    match peer.decapsulate(&[], &mut out2) {
+                                        TunnResult::WriteToTunnelV4(p, _) | TunnResult::WriteToTunnelV6(p, _) => {
+                                            DecapAction::WriteTunnel(p.to_vec())
+                                        }
+                                        TunnResult::WriteToNetwork(q) => DecapAction::SendNetwork(q.to_vec()),
+                                        _ => DecapAction::Nothing,
                                     }
+                                };
+                                match queued_action {
+                                    DecapAction::WriteTunnel(p) => {
+                                        let mut writer = tun_writer.lock().await;
+                                        let _ = writer.write_all(&p).await;
+                                    }
+                                    DecapAction::SendNetwork(q) => {
+                                        let endpoint = wg_peer.lock().await.endpoint();
+                                        if let Some(ep) = endpoint {
+                                            let _ = udp.send_to(&q, ep).await;
+                                        }
+                                    }
+                                    _ => break,
                                 }
-                                _ => {}
                             }
                         }
-                        TunnResult::Err(e) => {
-                            log::warn!("[vpn] WG decapsulation error from {}: {:?}", addr, e);
-                        }
-                        _ => {}
+                        DecapAction::Error | DecapAction::Nothing => {}
                     }
                 }
             })
