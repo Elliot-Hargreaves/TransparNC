@@ -29,11 +29,6 @@ const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_millis(1000);
 /// Default delay between successive probe rounds.
 const DEFAULT_PROBE_INTERVAL: Duration = Duration::from_millis(200);
 
-/// Default delay between individual probe sends within a single round.
-/// Throttles back-to-back UDP sends to avoid generating a flood of tiny
-/// packets that can trigger provider DDoS detection.
-const DEFAULT_PROBE_SEND_DELAY: Duration = Duration::from_millis(20);
-
 /// Configuration for ICE connectivity probe behaviour.
 ///
 /// Allows callers to override the default probe budget — useful for lossy
@@ -46,10 +41,6 @@ pub struct ProbeConfig {
     pub timeout: Duration,
     /// Delay between successive probe rounds.
     pub interval: Duration,
-    /// Delay inserted between individual probe sends within a single round.
-    /// Set to zero in tests for speed; keep non-zero in production to avoid
-    /// flooding the network with back-to-back small UDP packets.
-    pub probe_send_delay: Duration,
 }
 
 impl Default for ProbeConfig {
@@ -59,7 +50,6 @@ impl Default for ProbeConfig {
             max_attempts: DEFAULT_MAX_PROBE_ATTEMPTS,
             timeout: DEFAULT_PROBE_TIMEOUT,
             interval: DEFAULT_PROBE_INTERVAL,
-            probe_send_delay: DEFAULT_PROBE_SEND_DELAY,
         }
     }
 }
@@ -381,10 +371,6 @@ pub async fn check_connectivity_with_config(
                             log::debug!("[ice] Sent probe to {}", remote_addrs[send_idx]);
                         }
                         send_idx += 1;
-                        // Throttle individual sends to avoid back-to-back UDP floods.
-                        if !config.probe_send_delay.is_zero() {
-                            tokio::time::sleep(config.probe_send_delay).await;
-                        }
                     }
                 }
             } else {
@@ -843,7 +829,6 @@ mod tests {
             max_attempts: 15,
             timeout: Duration::from_millis(500),
             interval: Duration::from_millis(100),
-            probe_send_delay: Duration::ZERO,
         };
 
         let (result_a, result_b) = tokio::join!(
