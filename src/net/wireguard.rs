@@ -103,6 +103,16 @@ impl WireGuardPeer {
     pub fn set_endpoint(&mut self, endpoint: SocketAddr) {
         self.endpoint = Some(endpoint);
     }
+
+    /// Drives boringtun's internal timer wheel.
+    ///
+    /// Must be called periodically (every ~100 ms) to emit keepalives,
+    /// trigger re-handshakes on session expiry, and retransmit lost
+    /// handshake packets. Returns a `TunnResult` that may contain a
+    /// packet to send over the network.
+    pub fn update_timers<'a>(&mut self, out: &'a mut [u8]) -> TunnResult<'a> {
+        self.tunnel.update_timers(out)
+    }
 }
 
 #[cfg(test)]

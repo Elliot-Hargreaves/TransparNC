@@ -309,6 +309,35 @@ impl VpnEngine {
             })
         };
 
+        // WireGuard timer task: drives boringtun's internal timer wheel every 100 ms.
+        // Without this, keepalives are never sent (NAT mappings expire), session keys
+        // are never renewed (tunnel goes silent after ~180 s), and lost handshake
+        // packets are never retransmitted.
+        let wg_timer = {
+            let wg_peer = wg_peer.clone();
+            let udp = udp.clone();
+            tokio::spawn(async move {
+                let mut interval =
+                    tokio::time::interval(std::time::Duration::from_millis(100));
+                let mut out = [0u8; 65535];
+                loop {
+                    interval.tick().await;
+                    let mut peer = wg_peer.lock().await;
+                    match peer.update_timers(&mut out) {
+                        TunnResult::WriteToNetwork(packet) => {
+                            if let Some(endpoint) = peer.endpoint() {
+                                let _ = udp.send_to(packet, endpoint).await;
+                            }
+                        }
+                        TunnResult::Err(e) => {
+                            log::warn!("[vpn] WireGuard timer error: {:?}", e);
+                        }
+                        _ => {}
+                    }
+                }
+            })
+        };
+
         // Heartbeat / keep-alive checker task.
         let heartbeat_checker = {
             let peer_manager = peer_manager.clone();
@@ -333,6 +362,7 @@ impl VpnEngine {
             _ = tun_to_udp => {}
             _ = udp_to_tun => {}
             _ = heartbeat_checker => {}
+            _ = wg_timer => {}
             _ = shutdown_rx => {
                 log::info!("[vpn] Shutdown signal received for peer index {}", virtual_index);
             }
