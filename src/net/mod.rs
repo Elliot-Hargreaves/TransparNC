@@ -266,24 +266,10 @@ impl VpnEngine {
                             log::warn!("[vpn] No endpoint for peer {}", dest_ip);
                             continue;
                         }
-                        // Drain all packets queued behind the handshake. boringtun
-                        // may have buffered multiple data packets while waiting for
-                        // the session to be established; we must flush them all or
-                        // they are silently dropped (UDP has no retransmission).
-                        loop {
-                            let mut out2 = [0u8; 65535];
-                            let queued = {
-                                let mut peer = wg_peer.lock().await;
-                                match peer.encapsulate(&[], &mut out2) {
-                                    TunnResult::WriteToNetwork(q) => Some((q.to_vec(), peer.endpoint())),
-                                    _ => None,
-                                }
-                            };
-                            match queued {
-                                Some((q, Some(ep))) => { let _ = udp.send_to(&q, ep).await; }
-                                _ => break,
-                            }
-                        }
+                        // Queue draining is handled by the udp_to_tun path via
+                        // decapsulate(&[]) after the handshake response is received.
+                        // Calling encapsulate(&[]) here would flood the network with
+                        // keepalive packets rather than draining queued data packets.
                     }
                 }
             })
