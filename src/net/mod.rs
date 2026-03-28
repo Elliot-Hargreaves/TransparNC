@@ -281,23 +281,21 @@ impl VpnEngine {
                             // WireGuard handshake response — send it back.
                             let _ = udp.send_to(packet, addr).await;
 
-                            // Per boringtun's API: after decapsulate returns WriteToNetwork,
-                            // repeat with an empty datagram to drain any queued data packets
-                            // (e.g. the TCP SYN that triggered the handshake). The drain may
-                            // yield WriteToTunnelV4/V6 (decrypted data → TUN) or another
-                            // WriteToNetwork (e.g. a keepalive → UDP).
-                            let mut flush_out = [0u8; 2048];
-                            loop {
-                                match peer.decapsulate(&[], &mut flush_out) {
-                                    TunnResult::WriteToTunnelV4(pkt, _)
-                                    | TunnResult::WriteToTunnelV6(pkt, _) => {
-                                        let mut writer = tun_writer.lock().await;
-                                        let _ = writer.write_all(pkt).await;
+                            // After a handshake completes, boringtun internally queues the
+                            // first data packet that triggered the handshake. We must drain
+                            // that queue immediately; otherwise the queued packet stalls until
+                            // the next TUN packet arrives (typically a TCP retransmit, ~1–3s).
+                            // This covers both initial connections and reconnects after session
+                            // key expiry.
+                            if let Some(endpoint) = peer.endpoint() {
+                                let mut flush_out = [0u8; 2048];
+                                loop {
+                                    match peer.encapsulate(&[], &mut flush_out) {
+                                        TunnResult::WriteToNetwork(flushed) => {
+                                            let _ = udp.send_to(flushed, endpoint).await;
+                                        }
+                                        _ => break,
                                     }
-                                    TunnResult::WriteToNetwork(pkt) => {
-                                        let _ = udp.send_to(pkt, addr).await;
-                                    }
-                                    _ => break,
                                 }
                             }
                         }
